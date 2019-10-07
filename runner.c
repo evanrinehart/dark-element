@@ -6,13 +6,16 @@
 // C program which continually applies the evaluation rule
 
 enum H
-  {STAR,T,F,Z,NIL,S,P,CONS,INT,INPUT,OUTPUT,EXIT,LAM,
+  {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,LAM,
   IF,ITER,AT,PR1,PR2,FOLD,
-  IND,FWD};
+  IND,FWD,BIND,PACK,SEQ};
 // other things... ADDR, DOUBLE, BUFFER, CELL, VECTOR
 
 enum GI {COPYX, COPYC, PRINT1, PRINT2, PRINT3};
 enum subop {RPLUS, IMM, X, CLO, ADDR};
+
+enum reason
+  {FFI_EOF, FFI_ARGUMENT_ERROR, FFI_EXIT};
 
 struct obj;
 
@@ -41,6 +44,32 @@ struct genIn {
   int pay[3];
 };
 
+struct runtime {
+  int heapSize;
+  int heapPtr;
+  struct obj* heap;
+  struct obj* oldHeap;
+  int stackSize;
+  int stackPtr;
+  struct obj** stack;
+  int exceptionStackPtr;
+  struct obj* exceptionStack[64];
+  struct obj unit;
+  struct obj ff;
+  struct obj tt;
+  struct obj nil;
+  struct obj zero;
+  enum reason stuckReason;
+  struct obj* cursor;
+  struct obj* root;
+};
+
+struct ffi {
+  char name[64];
+  int spaceNeeded;
+  struct obj* (*execute)(struct obj* x, struct obj* k, struct runtime* rts);
+};
+
 struct sizedGen {
   int size;
   struct genIn* code;
@@ -48,155 +77,166 @@ struct sizedGen {
 
 struct sizedGen generators[4096];
 
-int heapSize = 4096;
-struct obj* heap1;
-struct obj* heap2;
-struct obj* heap;
-struct obj* root;
-struct obj* cursor;
-int heapPtr = 0;
-struct obj* star;
-struct obj* tt;
-struct obj* ff;
-struct obj* nil;
-struct obj* zero;
+struct ffi ffiBindings[64];
 
-int stackSize = 256;
-struct obj** stack;
-int stackPtr;
-
-
-int isVal(struct obj* o){
+int isVal(struct obj* o, int dontExec){
+  if(dontExec > 0 && o->h == BIND) return 1;
   if(o->h <= LAM) return 1;
   else            return 0;
 }
 
-
-
 // Stack and Heap operations
 
-void growStack(){
-  stackSize *= 2;
+void growStack(struct runtime* rts){
+  rts->stackSize *= 2;
   struct obj** tmp;
-  tmp = realloc(stack, stackSize * sizeof(struct obj*));
+  tmp = realloc(rts->stack, rts->stackSize * sizeof(struct obj*));
   if(tmp == NULL){
     fprintf(stderr, "failed to grow stack (%s)\n", strerror(errno));
     exit(-1);
   }
-  stack = tmp;
+  rts->stack = tmp;
 }
 
-void growHeaps(){
-  heapSize *= 2;
-  struct obj* tmp;
-  int which = heap==heap1 ? 1 : 2;
-
-  tmp = realloc(heap1, heapSize * sizeof(struct obj));
-  if(tmp == NULL){
-    fprintf(stderr, "failed to grow heap1 (%s)\n", strerror(errno));
-    exit(-1);
-  }
-  heap1 = tmp;
-
-  tmp = realloc(heap2, heapSize * sizeof(struct obj));
-  if(heap2==NULL){
-    fprintf(stderr, "failed to grow heap2 (%s)\n", strerror(errno));
-    exit(-1);
-  }
-  heap2 = tmp;
-
-  heap = which==1 ? heap1 : heap2;
+void push(struct obj* ptr, struct runtime* rts){
+  if(rts->stackPtr+1 == rts->stackSize) growStack(rts);
+  rts->stack[rts->stackPtr] = ptr;
+  rts->stackPtr++;
 }
 
-void push(struct obj* ptr){
-  if(stackPtr+1 == stackSize) growStack();
-  stack[stackPtr] = ptr;
-  stackPtr++;
-}
-
-struct obj* pop(){
-  if(stackPtr == 0){
+struct obj* pop(struct runtime* rts){
+  if(rts->stackPtr == 0){
     fprintf(stderr, "stack underflow\n");
     exit(-1);
   }
-  stackPtr--;
-  return stack[stackPtr];
+  rts->stackPtr--;
+  return rts->stack[rts->stackPtr];
 }
 
-struct obj* put0(enum H h){
-  struct obj o = {h};
-  struct obj* ptr = heap + heapPtr;
-  heap[heapPtr] = o;
-  heapPtr++;
+struct obj* putObj(enum H h, struct runtime* rts){
+  struct obj* ptr = rts->heap + rts->heapPtr;
+  rts->heap[rts->heapPtr].h = h;
+  rts->heapPtr++;
   return ptr;
 }
 
-struct obj* put1(enum H h, ucom x){
-  struct obj o = {h,{x}};
-  struct obj* ptr = heap + heapPtr;
-  heap[heapPtr] = o;
-  heapPtr++;
-  return ptr;
+struct obj* put1(enum H h, ucom x, struct runtime* rts){
+  struct obj* o = putObj(h,rts);
+  o->com[0] = x;
+  return o;
 }
 
-ucom put1u(enum H h, ucom x){
-  struct obj* o = put1(h,x);
-  ucom v = {.ptr = o};
+ucom put1u(enum H h, ucom x, struct runtime* rts){
+  ucom v = {.ptr = put1(h,x,rts) };
   return v;
 }
 
-struct obj* put2(enum H h, ucom x, ucom y){
-  struct obj o = {h,{x,y}};
-  struct obj* ptr = heap + heapPtr;
-  heap[heapPtr] = o;
-  heapPtr++;
-  return ptr;
+struct obj* put1i(enum H h, int i, struct runtime* rts){
+  struct obj* o = putObj(h, rts);
+  o->com[0].i = i;
+  return o;
 }
 
-ucom put2u(enum H h, ucom x, ucom y){
-  struct obj* o = put2(h,x,y);
-  ucom v = {.ptr = o};
+struct obj* put2(enum H h, ucom x, ucom y, struct runtime* rts){
+  struct obj* o = putObj(h,rts);
+  o->com[0] = x;
+  o->com[1] = y;
+  return o;
+}
+
+struct obj* put2p(enum H h, struct obj* x, struct obj* y, struct runtime* rts){
+  struct obj* o = putObj(h, rts);
+  o->com[0].ptr = x;
+  o->com[1].ptr = y;
+  return o;
+}
+
+struct obj* put3(enum H h, ucom x, ucom y, ucom z, struct runtime* rts){
+  struct obj* o = putObj(h, rts);
+  o->com[0] = x;
+  o->com[1] = y;
+  o->com[2] = z;
+  return o;
+}
+
+struct obj* put3p(enum H h, struct obj* x, struct obj* y, struct obj* z, struct runtime* rts){
+  struct obj* o = putObj(h, rts);
+  o->com[0].ptr = x;
+  o->com[1].ptr = y;
+  o->com[2].ptr = z;
+  return o;
+}
+
+ucom put3u(enum H h, ucom x, ucom y, ucom z, struct runtime* rts){
+  ucom v = {.ptr = put3(h,x,y,z,rts) };
   return v;
 }
 
-
-struct obj* put3(enum H h, ucom x, ucom y, ucom z){
-  struct obj o = {h,{x,y,z}};
-  struct obj* ptr = heap + heapPtr;
-  heap[heapPtr] = o;
-  heapPtr++;
+struct obj* cloneObj(struct obj* orig, struct runtime* rts){
+  struct obj* ptr = rts->heap + rts->heapPtr;
+  rts->heap[rts->heapPtr] = *orig;
+  rts->heapPtr++;
   return ptr;
 }
 
-ucom put3u(enum H h, ucom x, ucom y, ucom z){
-  struct obj* o = put3(h,x,y,z);
-  ucom v = {.ptr = o};
-  return v;
+struct obj* cloneClosure(struct obj* orig, int size, struct runtime* rts){
+  int i;
+  struct obj* clo;
+  for(i=0; i<size; i++){
+    clo = cloneObj(&orig[i], rts);
+  }
+  // awkwardly clo points to the last element, go back size-1
+  return clo - (size - 1);
 }
 
-struct obj* cloneObj(struct obj* orig){
-  struct obj* ptr = heap + heapPtr;
-  heap[heapPtr] = *orig;
-  heapPtr++;
-  return ptr;
+
+// Exception stuff
+
+struct obj* popExStack(struct runtime* rts){
+  if(rts->exceptionStackPtr == 0){
+    fprintf(stderr, "exception stack underflow\n");
+    exit(-1);
+  }
+
+  rts->exceptionStackPtr--;
+  return rts->exceptionStack[rts->exceptionStackPtr];
+}
+
+void pushExStack(struct obj* x, struct runtime* rts){
+  // FIXME
+}
+
+struct obj* mkFrame(struct obj* act, struct obj* k, struct runtime* rts){
+  // let mkFrame = \act k -> act >>= (\x -> pop >>= \_ -> k x)
+  // be a pregenerated "frame maker" function
+  // then this procedure generates: (mkFrame @ act) @ k
+  // and so requires 2 space.
+  return NULL; // act >>= (\x -> pop >>= \_ -> k x)
+}
+
+struct obj* mkHandler(struct obj* h, struct obj* k, struct runtime* rts){
+  // let mkHandler = \h k -> \ex -> h ex >>= k
+  // be a pregnerated "handler maker" function
+  // then this procedure generates: (mkHandler @ h) @ k
+  // and so requires 2 space
+  return NULL; // \ex -> h ex >>= k
 }
 
 
 
 // Printers So We Can Tell What's Going On
 
-#define REL(o,i) (o->com[i].ptr - heap)
+#define REL(o,i) (o->com[i].ptr - rts->heap)
 
-void printObj(struct obj* o){
+void printObj(struct obj* o, struct runtime* rts){
   switch(o->h){
-    case STAR: printf("○\b●\n"); return;
+    case UNIT: printf("○\b●\n"); return;
     case T:    printf("T\n"); return;
     case F:    printf("F\n"); return;
     case Z:    printf("Z\n"); return;
     case S:    printf("S %ld\n",REL(o,0)); return;
     case P:    printf("P %ld %ld\n",REL(o,0),REL(o,1)); return;
     case NIL:  printf("NIL\n"); return;
-    case EXIT: printf("EXIT\n"); return;
     case CONS: printf(":: %ld %ld\n",REL(o,0),REL(o,1)); return;
     case LAM:  printf("λ %d g%d\n", o->com[0].i, o->com[1].i); return;
     case IF:   printf("IF %ld %ld %ld\n",REL(o,0),REL(o,1),REL(o,2)); return;
@@ -207,15 +247,17 @@ void printObj(struct obj* o){
     case AT:   printf("@ %ld %ld\n",REL(o,0),REL(o,1)); return;
     case FWD:  printf("FWD %ld\n",REL(o,0)); return;
     case IND:  printf("IND %ld\n",REL(o,0)); return;
-    case INPUT: printf("INPUT %ld\n",REL(o,0)); return;
-    case OUTPUT: printf("OUTPUT %ld %ld\n",REL(o,0),REL(o,1)); return;
     case INT:  printf("INT %d\n", o->com[0].i); return;
+    case DO:  printf("DO %s %ld\n", ffiBindings[o->com[0].i].name, REL(o,1)); return;
+    case BIND:  printf("BIND %ld %ld\n", REL(o,0), REL(o,1)); return;
+    case PACK:  printf("PACK %ld\n",REL(o,0) ); return;
+    case SEQ:  printf("SEQ %ld %ld\n", REL(o,0), REL(o,1)); return;
   }
 }
 
 void printK(enum H k){
   switch(k){
-    case STAR: printf("STAR "); return;
+    case UNIT: printf("UNIT "); return;
     case T:    printf("T "); return;
     case F:    printf("F "); return;
     case Z:    printf("Z "); return;
@@ -232,18 +274,19 @@ void printK(enum H k){
     case AT:   printf("@ "); return;
     case IND:  printf("IND "); return;
     case FWD:  printf("FWD "); return;
-    case EXIT: printf("EXIT "); return;
-    case INPUT: printf("INPUT "); return;
-    case OUTPUT: printf("OUTPUT "); return;
     case INT: printf("INT "); return;
+    case DO: printf("DO "); return;
+    case BIND: printf("BIND "); return;
+    case PACK: printf("PACK "); return;
+    case SEQ: printf("SEQ "); return;
   }
 }
 
-void printHeap(){
+void printHeap(struct runtime* rts){
   int i;
   char num[16];
   int a = 0;
-  int b = heapPtr;
+  int b = rts->heapPtr;
   int digits = 0;
   int tmp = b;
   while(tmp > 0){ digits++; tmp /= 10; }
@@ -251,11 +294,11 @@ void printHeap(){
   digits += 2;
 
   for(i=a; i<b; i++){
-    if(heap+i==root) printf("> ");
+    if(rts->heap+i==rts->root) printf("> ");
     else printf("  ");
     sprintf(num,"%d.",i);
     printf("%-*s ",digits,num);
-    printObj(heap+i);
+    printObj(rts->heap+i, rts);
   }
 }
 
@@ -319,7 +362,7 @@ void printGen(struct sizedGen sg){
 // Generator Loader
 
 enum H strToH(char* s){
-  if(strcmp(s, "STAR")==0) return STAR;
+  if(strcmp(s, "UNIT")==0) return UNIT;
   else if(strcmp(s, "T")==0) return T;
   else if(strcmp(s, "F")==0) return F;
   else if(strcmp(s, "Z")==0) return Z;
@@ -336,8 +379,6 @@ enum H strToH(char* s){
   else if(strcmp(s, "FOLD")==0) return FOLD;
   else if(strcmp(s, "IND")==0) return IND;
   else if(strcmp(s, "FWD")==0) return FWD;
-  else if(strcmp(s, "INPUT")==0) return INPUT;
-  else if(strcmp(s, "OUTPUT")==0) return OUTPUT;
   else if(strcmp(s, "INT")==0) return INT;
   else{
     fprintf(stderr, "strToH failed\n");
@@ -470,88 +511,147 @@ struct sizedGen loadGenerator(char* path){
 // Garbage Collector
 
 // forward declaration for mutual recursion
-struct obj* gcLoop(struct obj* this);
+struct obj* gcLoop(struct obj* this, struct runtime* rts);
 
 // this has already been moved, you just need to fixup its components.
 // also, this is guaranteed NOT to be a "fat" lambda node
-void gcThin(struct obj* this){
+void gcThin(struct obj* this, struct runtime* rts){
   switch(this->h){
     case PR1:
     case PR2:
     case S:
     case IND:
-      this->com[0].ptr = gcLoop(this->com[0].ptr);
+    case PACK:
+      this->com[0].ptr = gcLoop(this->com[0].ptr, rts);
       break;
     case P:
     case AT:
     case CONS:
-      this->com[0].ptr = gcLoop(this->com[0].ptr);
-      this->com[1].ptr = gcLoop(this->com[1].ptr);
+    case BIND:
+    case SEQ:
+      this->com[0].ptr = gcLoop(this->com[0].ptr, rts);
+      this->com[1].ptr = gcLoop(this->com[1].ptr, rts);
       break;
     case IF:
     case ITER:
     case FOLD:
-      this->com[0].ptr = gcLoop(this->com[0].ptr);
-      this->com[1].ptr = gcLoop(this->com[1].ptr);
-      this->com[2].ptr = gcLoop(this->com[2].ptr);
+      this->com[0].ptr = gcLoop(this->com[0].ptr, rts);
+      this->com[1].ptr = gcLoop(this->com[1].ptr, rts);
+      this->com[2].ptr = gcLoop(this->com[2].ptr, rts);
       break;
-    default:
+    case DO:
+      this->com[1].ptr = gcLoop(this->com[1].ptr, rts);
+      break;
+    case LAM: // do nothing
+    case UNIT:
+    case T:
+    case F:
+    case NIL:
+    case Z:
+    case INT:
+    case FWD:
       break;
   }
 }
 
-struct obj* gcLoop(struct obj* this){
-  // annoying magic locations of atomic symbols
-  if(this->h == STAR){ return heap+0; }
-  if(this->h == T){    return heap+1; }
-  if(this->h == F){    return heap+2; }
-  if(this->h == NIL){  return heap+3; }
-  if(this->h == Z){    return heap+4; }
+struct obj* gcLoop(struct obj* this, struct runtime* rts){
+  if(this->h == UNIT){ return &rts->unit; }
+  if(this->h == T){    return &rts->tt; }
+  if(this->h == F){    return &rts->ff; }
+  if(this->h == NIL){  return &rts->nil; }
+  if(this->h == Z){    return &rts->zero; }
 
   //if this is an already moved node, return the forwarding pointer
   if(this->h == FWD){ return this->com[0].ptr; }
   
   //otherwise move to new heap and update original with forwarding pointer
-  struct obj* that = cloneObj(this);
+  struct obj* that = cloneObj(this, rts);
   this->h = FWD;
   this->com[0].ptr = that;
 
   // "fat lambda" node needs special care
   int lamSize = that->com[0].i;
   if(that->h == LAM && lamSize > 0){
-    int i;
-    for(i=0; i < lamSize; i++){ cloneObj(this+1+i); }
-    for(i=0; i < lamSize; i++){ gcThin(that+1+i); }
+    if(this->com[2].ptr->h == FWD){//shared closure already moved
+      that->com[2] = this->com[2];
+    }
+    else{
+      struct obj* clo = cloneClosure(that->com[2].ptr, lamSize, rts);
+      that->com[2].ptr->h = FWD;
+      that->com[2].ptr->com[0].ptr = clo;
+      that->com[2].ptr = clo;
+      int i;
+      for(i=0; i < lamSize; i++){ gcThin(&clo[i], rts); }
+    }
   }
   else{
-    gcThin(that);
+    gcThin(that, rts);
   }
 
   return that;
 }
 
+void swapHeaps(struct runtime* rts){
+  struct obj* tmp = rts->heap;
+  rts->heap = rts->oldHeap;
+  rts->oldHeap = tmp;
+}
 
-// Entry point to GC. Usually this returns without doing anything.
-// if amount is not available, it does a compaction and possibly heap
-// expansion. In any case it also fixes references on the stack and returns
-// a corrected cursor.
-struct obj* reserve(int amount, struct obj* cursor){
-  if(heapPtr + amount < heapSize - 1) return cursor;
-
-  //compact the heap, invalidates any local pointers into heap
-  heap = heap==heap1 ? heap2 : heap1;
-  heapPtr = 5; // magic, don't mess up atomic symbols
-  root = gcLoop(root);
-
-  //expand heaps until we really have enough space
-  while(amount >= heapSize - heapPtr) growHeaps();
+void gc(struct runtime* rts){
+  swapHeaps(rts);
+  rts->heapPtr = 5; // magic, don't mess up atomic symbols
+  rts->root = gcLoop(rts->root, rts);
 
   //fix the stack
   int i;
-  for(i=0;i<stackPtr;i++) stack[i] = stack[i]->com[0].ptr;
+  for(i=0;i<rts->stackPtr;i++) rts->stack[i] = rts->stack[i]->com[0].ptr;
 
-  //return fixed cursor (don't fix if root)
-  return cursor==root ? root : cursor->com[0].ptr;
+  //fix cursor if any
+  if(rts->cursor) rts->cursor = rts->cursor->com[0].ptr;
+}
+
+void growHeaps(struct runtime* rts, int newSize){
+  struct obj* tmp;
+
+  tmp = realloc(rts->oldHeap, newSize * sizeof(struct obj));
+  if(tmp == NULL){
+    fprintf(stderr, "failed to grow heap1 (%s)\n", strerror(errno));
+    exit(-1);
+  }
+
+  rts->oldHeap = tmp;
+
+  gc(rts);
+
+  tmp = realloc(rts->oldHeap, newSize * sizeof(struct obj));
+  if(tmp == NULL){
+    fprintf(stderr, "failed to grow heap1 (%s)\n", strerror(errno));
+    exit(-1);
+  }
+
+  rts->oldHeap = tmp;
+  rts->heapSize = newSize;
+}
+
+
+// Entry point to GC. Usually this returns without doing anything.
+// if amount is not available, it does a compaction and possibly heap
+// expansion. In any case it also fixes references on the stack.
+struct obj* reserve(int amount, struct obj* cur, struct runtime* rts){
+  if(rts->heapPtr + amount < rts->heapSize - 1) return cur;
+
+  rts->cursor = cur;
+  gc(rts);
+
+  if(rts->heapPtr + amount < rts->heapSize - 1){
+    int newSize = 4096;
+    while(!(rts->heapPtr + amount < newSize - 1)) newSize *= 2;
+    growHeaps(rts, newSize);
+  }
+
+  cur = rts->cursor;
+  rts->cursor = NULL;
+  return cur;
 }
 
 
@@ -561,27 +661,32 @@ struct obj* reserve(int amount, struct obj* cursor){
 // Actually there are two interpreters. One for the generator language
 // one for the heap language.
 
-struct obj* runGenerator(struct obj* x, struct obj clo[], struct sizedGen sg){
+struct obj* runGenerator(
+  struct obj* x,
+  struct obj clo[],
+  struct sizedGen sg,
+  struct runtime* rts
+){
   ucom tmp[3];
   int i,j;
-  struct obj* target = heap + heapPtr;
+  struct obj* target = rts->heap + rts->heapPtr;
   int n = sg.size;
   struct genIn* gi;
   for(i=0; i<n; i++){
     gi = sg.code + i;
     switch(gi->type){
-      case COPYX: cloneObj(x); break;
-      case COPYC: cloneObj(&clo[gi->pay[0]]); break;
+      case COPYX: cloneObj(x,rts); break;
+      case COPYC: cloneObj(&clo[gi->pay[0]], rts); break;
       case PRINT1:
         switch(gi->sub[0]){
           case RPLUS:  tmp[0].ptr = target+gi->pay[0]; break;
           case IMM:    tmp[0].i   = gi->pay[0]; break;
           case X:      tmp[0].ptr = x; break;
           case CLO:    tmp[0].ptr = &clo[gi->pay[0]]; break;
-          case ADDR:   tmp[0].ptr = heap + gi->pay[0]; break;
+          case ADDR:   tmp[0].ptr = rts->heap + gi->pay[0]; break;
           default: fprintf(stderr, "bad generator subinstruction 1\n"); exit(-1); break;
         }
-        put1(gi->K, tmp[0]);
+        put1(gi->K, tmp[0], rts);
         break;
       case PRINT2:
         for(j=0; j<2; j++){
@@ -590,11 +695,11 @@ struct obj* runGenerator(struct obj* x, struct obj clo[], struct sizedGen sg){
             case IMM:   tmp[j].i   = gi->pay[j]; break;
             case X:     tmp[j].ptr = x; break;
             case CLO:   tmp[j].ptr = &clo[gi->pay[j]]; break;
-            case ADDR:  tmp[j].ptr = heap + gi->pay[j]; break;
+            case ADDR:  tmp[j].ptr = rts->heap + gi->pay[j]; break;
             default: fprintf(stderr, "bad generator subinstruction 2\n"); exit(-1); break;
           }
         }
-        put2(gi->K, tmp[0], tmp[1]);
+        put2(gi->K, tmp[0], tmp[1], rts);
         break;
       case PRINT3:
         for(j=0; j<3; j++){
@@ -603,11 +708,11 @@ struct obj* runGenerator(struct obj* x, struct obj clo[], struct sizedGen sg){
             case IMM:   tmp[j].i   = gi->pay[j]; break;
             case X:     tmp[j].ptr = x; break;
             case CLO:   tmp[j].ptr = &clo[gi->pay[j]]; break;
-            case ADDR:  tmp[j].ptr = heap + gi->pay[j]; break;
+            case ADDR:  tmp[j].ptr = rts->heap + gi->pay[j]; break;
             default: fprintf(stderr, "bad generator subinstruction 3\n"); exit(-1); break;
           }
         }
-        put3(gi->K, tmp[0], tmp[1], tmp[2]);
+        put3(gi->K, tmp[0], tmp[1], tmp[2], rts);
         break;
       default: fprintf(stderr, "bad generator instruction\n"); exit(-1);
     }
@@ -624,21 +729,20 @@ void crash(char* msg){
 }
 
 // evaluate a chosen heap term until you get a value (if ever)
-struct obj* crunch(struct obj* start){
+struct obj* crunch(struct obj* start, struct runtime* rts){
 
   struct obj* cur = start;
   struct obj* answer = NULL;
   int m;
-
-  //the stack should start empty
-  if(stackPtr != 0) crash("crunch expects an empty stack\n");
+  struct ffi* ffi;
+  int dontExec = 0; // dontExec > 0, BIND is a value. otherwise, BIND is a dtor
 
   for(;;){
     //value?
-    if(isVal(cur)){
-      if(stackPtr == 0) return cur;
+    if(isVal(cur,dontExec)){
+      if(rts->stackPtr == 0) return cur;
       answer = cur;
-      cur = pop();
+      cur = pop(rts);
       continue;
     }
 
@@ -654,13 +758,19 @@ struct obj* crunch(struct obj* start){
 
     //can't necessarily destruct
     if(answer == NULL){
-      push(cur);
+      push(cur, rts);
 // this check could be made redundant by always putting scrutinee first
       switch(cur->h){
         case PR1:
         case PR2:
         case AT:
+        case BIND:
+        case PACK:
           cur = cur->com[0].ptr;
+          continue;
+        case SEQ:
+          cur = cur->com[0].ptr;
+          dontExec++;
           continue;
         case ITER:
         case IF:
@@ -671,12 +781,43 @@ struct obj* crunch(struct obj* start){
       }
     }
 
+    //after this point, answer (value of scrutinee) is available
+
+    //PACK and SEQ
+    if(cur->h == PACK){
+      //pack(Z,i) = int(i)
+      //pack(S n, i) = pack(n, i+1);
+      //pack(int(j), i) = int(j + i);
+      switch(cur->com[0].ptr->h){
+        case Z:
+          cur->h = INT;
+          cur->com[0].i = cur->com[1].i;
+          break;
+        case S:
+          cur->com[1].i++;
+          cur->com[0]= cur->com[0].ptr->com[0];
+        case INT:
+          cur->h = INT;
+          cur->com[0].i = cur->com[1].i + cur->com[0].ptr->com[0].i;
+          break;
+        default: crash("ctor/dtor mismatch (PACK)");
+      }
+      continue;
+    }
+
+    if(cur->h == SEQ){
+      //seq(val,b) = b
+      *(cur) = *(cur->com[1].ptr);
+      dontExec--;
+      continue;
+    }
+
     //matching destructor, do destruct
     if(answer->h == P){
-      cur->com[0].ptr = answer;
+      //make sure to replace dtor node with result
       switch(cur->h){
-        case PR1: cur = answer->com[0].ptr; break;
-        case PR2: cur = answer->com[1].ptr; break;
+        case PR1: *cur = *(answer->com[0].ptr); break;
+        case PR2: *cur = *(answer->com[1].ptr); break;
         default: crash("dtor-ctor mismatch");
       }
       answer = NULL;
@@ -684,10 +825,10 @@ struct obj* crunch(struct obj* start){
     }
 
     if(cur->h == IF){
-      cur->com[2].ptr = answer;
+      //cur->com[2].ptr = answer;
       switch(answer->h){
-        case F: cur = cur->com[0].ptr; break;
-        case T: cur = cur->com[1].ptr; break;
+        case F: *cur = *(cur->com[0].ptr); break;
+        case T: *cur = *(cur->com[1].ptr); break;
         default: crash("dtor-ctor mismatch");
       }
       answer = NULL;
@@ -695,28 +836,32 @@ struct obj* crunch(struct obj* start){
     }
 
     if(cur->h == ITER){
-      cur->com[2].ptr = answer;
+      //cur->com[2].ptr = answer;
       switch(answer->h){
-        case Z: cur = cur->com[0].ptr; break;
+        case Z: *cur = *(cur->com[0].ptr); break;
         case S:
-          cur = reserve(2,cur);
+          cur = reserve(1,cur,rts);
           ucom b = cur->com[0];
           ucom f = cur->com[1];
           ucom n = cur->com[2].ptr->com[0];
           // iter(b,f,S n) = f @ iter(b,f,n)
-          cur = put2(AT,f,put3u(ITER,b,f,n));
+          cur->h = AT;
+          cur->com[0] = f;
+          cur->com[1] = put3u(ITER,b,f,n, rts);
           break;
         case INT:
           m = answer->com[0].i;
           if(m <= 0){
-            cur = cur->com[0].ptr;
+            *cur = *(cur->com[0].ptr);
           }
           else{ // iter(b,f,int(n)) = f @ iter(b,f,int(n-1))
-            cur = reserve(3,cur);
+            cur = reserve(2,cur,rts);
             ucom b = cur->com[0];
             ucom f = cur->com[1];
             ucom um = {.i = m-1 };
-            cur = put2(AT, f, put3u(ITER, b, f, put1u(INT,um)));
+            cur->h = AT;
+            cur->com[0] = f;
+            cur->com[1] = put3u(ITER, b, f, put1u(INT,um,rts),rts);
             break;
           }
         default: crash("dtor-ctor mismatch");
@@ -726,17 +871,19 @@ struct obj* crunch(struct obj* start){
     }
 
     if(cur->h == FOLD){
-      cur->com[2].ptr = answer;
+      //cur->com[2].ptr = answer;
       switch(answer->h){
-        case NIL: cur = cur->com[0].ptr; break;
+        case NIL: *cur = *(cur->com[0].ptr); break;
         case CONS:
-          cur = reserve(3,cur);
-          ucom b = cur->com[0];
-          ucom f = cur->com[1];
-          ucom x = cur->com[2].ptr->com[0];
-          ucom xs = cur->com[2].ptr->com[1];
+          cur = reserve(2,cur,rts);
+          struct obj* b = cur->com[0].ptr;
+          struct obj* f = cur->com[1].ptr;
+          struct obj* x = cur->com[2].ptr->com[0].ptr;
+          struct obj* xs = cur->com[2].ptr->com[1].ptr;
           // fold(b,f,x:xs) = (f @ x) @ fold(b,f,xs)
-          cur = put2(AT,put2u(AT,f,x),put3u(FOLD,b,f,xs));
+          cur->h = AT;
+          cur->com[0].ptr = put2p(AT,f,x,rts);
+          cur->com[1].ptr = put3p(FOLD,b,f,xs,rts);
           break;
         default: crash("dtor-ctor mismatch");
       }
@@ -745,13 +892,35 @@ struct obj* crunch(struct obj* start){
     }
 
     if(cur->h == AT){
-      cur->com[0].ptr = answer;
+      //cur->com[0].ptr = answer;
       if(answer->h != LAM) crash("dtor-ctor mismatch LAM/AT");
-      cur = reserve(answer->com[0].i, cur);
-      cur = runGenerator(
-        cur->com[1].ptr,
-        cur->com[0].ptr + 1,
-        generators[cur->com[0].ptr->com[1].i]
+      cur = reserve(answer->com[0].i, cur, rts);
+      struct obj* body = runGenerator(
+        cur->com[1].ptr, // argument
+        cur->com[0].ptr->com[2].ptr, // closure
+        generators[cur->com[0].ptr->com[1].i],
+        rts
+      );
+      cur->h = IND;
+      cur->com[0].ptr = body;
+      answer = NULL;
+      continue;
+    }
+
+    // BIND is a dtor unless dontExec > 0
+    // this happens when evaluating an IO action inside SEQ
+    // an IO action can't be the scrutinee of any other dtor so we don't have
+    // to worry about executing I/O accidentally in other situations.
+    if(cur->h == BIND){
+      if(answer->h != DO) crash("dtor-ctor mismatch DO/BIND");
+      // DO ffi x >>= k   ==>  ffi(x,k)
+      ffi = &ffiBindings[answer->com[0].i];
+      // reserve an amount of space that depends on the FFI action
+      cur = reserve(ffi->spaceNeeded, cur, rts);
+      cur = ffi->execute(
+        cur->com[0].ptr->com[1].ptr, // x
+        cur->com[1].ptr,             // k
+        rts
       );
       answer = NULL;
       continue;
@@ -763,111 +932,115 @@ struct obj* crunch(struct obj* start){
 
 }
 
+// putc(c) >>= k  = *output c*, k ()
+struct obj* ioPutC(struct obj* x, struct obj* k, struct runtime* rts){
+
+  if(x->h == INT){
+    fputc(x->com[0].i, stdout);
+    return put2p(AT,k,&rts->unit,rts);
+  }
+  else{
+    rts->stuckReason = FFI_ARGUMENT_ERROR;
+    return NULL;
+  }
+
+}
+
+struct obj* ioGetC(struct obj* x, struct obj* k, struct runtime* rts){
+  int c = fgetc(stdin);
+
+  if(c==EOF && feof(stdin)){
+    // FIXME exception
+    fprintf(stderr, "getc: EOF\n");
+    exit(-1);
+  }
+  else if(c==EOF && ferror(stdin)){
+    // FIXME exception
+    fprintf(stderr, "%s\n", strerror(errno));
+    exit(-1);
+  }
+
+  return put2p(AT,k, put1i(INT, c, rts), rts);
+}
+
+struct obj* ioExit(struct obj* x, struct obj* ignore, struct runtime* rts){
+  rts->stuckReason = FFI_EXIT;
+  return &rts->unit;
+}
+
+struct obj* ioRaise(struct obj* ex, struct obj* ignore, struct runtime* rts){
+  //raise(ex)
+  //hand = popEx();
+  //hand(ex)
+  struct obj* hand = popExStack(rts); //never empty
+  return put2p(AT,hand,ex,rts);
+}
+
+struct obj* ioCatch(struct obj* pair, struct obj* k, struct runtime* rts){
+  //catch(act, h) >>= k
+  //  =  push(\ex -> h(ex) >>= return)
+  //     (act >>= \x -> pop >>= \_ -> return x) >>= k
+  //throw ex >>= _
+  //  =  hand <- pop
+  //     
+  struct obj* act = pair->com[0].ptr->com[0].ptr;
+  struct obj* h   = pair->com[0].ptr->com[1].ptr;
+  // push(\ex -> h ex >>= k)
+  struct obj* hand = mkHandler(h, k, rts); // needs to allocate 2 AT nodes
+  pushExStack(hand, rts);
+  return mkFrame(act, k, rts); // (act >>= \x -> pop >> k x)
+}
+
+// inserted by the execution of ioCatch
+struct obj* ioUncatch(struct obj* x, struct obj* k, struct runtime* rts){
+  popExStack(rts);
+  return put2p(AT, k, &rts->unit, rts);
+}
+
 
 int main(){
   int c;
   int counter;
   struct obj* tmp;
 
-  stack = malloc(stackSize * sizeof(struct obj*));
-  stackPtr = 0;
-
-  heap1 = malloc(heapSize * sizeof(struct obj));
-  heap2 = malloc(heapSize * sizeof(struct obj));
-  heap = heap1;
-  heapPtr = 0;
+  struct runtime* rts;
+  rts->stackSize = 4096;
+  rts->stack = malloc(rts->stackSize * sizeof(struct obj*));
+  rts->stackPtr = 0;
+  rts->heapSize = 4096;
+  rts->heap = malloc(rts->heapSize * sizeof(struct obj));
+  rts->oldHeap = malloc(rts->heapSize * sizeof(struct obj));
+  rts->heapPtr = 0;
 
   // initialize heaps with magic atomic values
-  star = put0(STAR);
-  tt   = put0(T);
-  ff   = put0(F);
-  nil  = put0(NIL);
-  zero = put0(Z);
-
-  int i;
-  for(i=0; i<5; i++){ heap2[i] = heap1[i]; }
+  rts->unit.h = UNIT;
+  rts->tt.h = T;
+  rts->ff.h = F;
+  rts->nil.h = NIL;
+  rts->zero.h = Z;
 
   // test data
-  ucom uzero = {.i=0};
-  ucom ustar = {.ptr=star};
-  put2(AT,put2u(LAM,uzero,uzero),ustar); // (\ 0 0) @ STAR
-  root = heap + 6;
+  put2p(AT,
+    put2p(LAM,&rts->zero,&rts->zero,rts),
+    &rts->unit,
+    rts
+  ); // (\ 0 0) @ UNIT
+  rts->root = rts->heap + 6;
 
   // load generator file
   struct sizedGen sg = loadGenerator("mygen");
   // register generator in position g0
   generators[0] = sg;
 
-  printHeap();
-  for(;;){
-    //printf("\n*crunch*\n\n");
-    root = crunch(root);
-    //printHeap();
+  printHeap(rts);
 
-    switch(root->h){
-      case EXIT:
-        return 0;
-      case INPUT:
-        c = fgetc(stdin);
-        if(c==EOF && feof(stdin)){
-          return 0;
-        }
-        else if(c==EOF && ferror(stdin)){
-          fprintf(stderr, "%s\n", strerror(errno));
-          exit(-1);
-        }
-
-        // crunch com[0] until  ...
-        tmp = crunch(root->com[0].ptr);
-        root->com[0].ptr = tmp;
-
-        // ... get a lambda. Apply it
-        if(root->com[0].ptr->h == LAM){
-          reserve(2, root);
-          ucom uc = {.i = c};
-          root = put2(AT,root->com[0],put1u(INT,uc));
-        }
-        else{
-          fprintf(stderr, "bad input continuation\n");
-          exit(-1);
-        }
-        break;
-
-      case OUTPUT:
-        counter = 0;
-
-        // consume numeric nodes into counter
-        for(;;){
-          tmp = crunch(root->com[0].ptr);
-          if(tmp->h == Z){
-            fputc(counter, stdout);
-            break;
-          }
-          else if(tmp->h == S){
-            counter++;
-            root->com[0] = tmp->com[0];
-            continue;
-          }
-          else if(tmp->h == INT){
-            counter += tmp->com[0].i;
-            fputc(counter, stdout);
-            break;
-          }
-        }
-
-        root = root->com[1].ptr;
-        break;
-      default:
-        printf("cur h = %d\n", root->h);
-        printHeap();
-        fprintf(stderr, "bad i/o\n");
-        exit(-1);
-    }
-
-  }
+  crunch(rts->root, rts);
 
   return 0;
+    
+
 }
+
 
 
 
@@ -905,6 +1078,9 @@ int main(){
 //
 // improvement0:
 //   write tests of all the existing generation instructions and data nodes
+//
+// improvement5: add exceptions for things like IO errors
+// improvement6: some kind of "stack trace"
 
 
 // destruct rules, generalizations
