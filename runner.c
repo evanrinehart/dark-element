@@ -403,220 +403,10 @@ void printHeap(struct runtime* rts){
   }
 }
 
-/*
-void printSubop(enum subop so){
-  switch(so){
-    case RPLUS:  printf("r+ ");  break;
-    case IMM:    printf("imm "); break;
-    case X:      printf("x ");   break;
-    case CLO:    printf("c[] "); break;
-    case ADDR:   printf("addr "); break;
-    default:
-      fprintf(stderr, "print subop failed\n");
-      exit(-1);
-  }
-}
 
-void printGenIn(struct genIn gi){
-  switch(gi.type){
-    case COPYX:
-      printf("copyx\n");
-      break;
-    case COPYC:
-      printf("copyc %d\n", gi.pay[0]);
-      break;
-    case PRINT1:
-      printf("print1 ");
-      printK(gi.K);
-      printSubop(gi.sub[0]);
-      printf("%d\n", gi.pay[0]);
-      break;
-    case PRINT2:
-      printf("print2 ");
-      printK(gi.K);
-      printSubop(gi.sub[0]);
-      printSubop(gi.sub[1]);
-      printf("%d %d\n", gi.pay[0], gi.pay[1]);
-      break;
-    case PRINT3:
-      printf("print3 ");
-      printK(gi.K);
-      printSubop(gi.sub[0]);
-      printSubop(gi.sub[1]);
-      printSubop(gi.sub[2]);
-      printf("%d %d %d\n", gi.pay[0], gi.pay[1], gi.pay[2]);
-      break;
-    default:
-      fprintf(stderr, "print genIn failed\n");
-      exit(-1);
-  }
-}
 
-void printGen(struct sizedGen sg){
-  printf("%d\n", sg.size);
-  int i;
-  for(i=0; i<sg.size; i++){
-    printGenIn(sg.code[i]);
-  }
-}
-*/
 
-// Generator Loader
 
-enum H toH(char* s, int* err){
-  if(strcmp(s, "UNIT")==0) return UNIT;
-  else if(strcmp(s, "T")==0) return T;
-  else if(strcmp(s, "F")==0) return F;
-  else if(strcmp(s, "Z")==0) return Z;
-  else if(strcmp(s, "S")==0) return S;
-  else if(strcmp(s, "P")==0) return P;
-  else if(strcmp(s, "NIL")==0) return NIL;
-  else if(strcmp(s, "CONS")==0) return CONS;
-  else if(strcmp(s, "LAM")==0) return LAM;
-  else if(strcmp(s, "IF")==0) return IF;
-  else if(strcmp(s, "ITER")==0) return ITER;
-  else if(strcmp(s, "AT")==0) return AT;
-  else if(strcmp(s, "PR1")==0) return PR1;
-  else if(strcmp(s, "PR2")==0) return PR2;
-  else if(strcmp(s, "FOLD")==0) return FOLD;
-  else if(strcmp(s, "IND")==0) return IND;
-  else if(strcmp(s, "FWD")==0) return FWD;
-  else if(strcmp(s, "INT")==0) return INT;
-  else if(strcmp(s, "BIND")==0) return BIND;
-  else if(strcmp(s, "DO")==0) return DO;
-  else if(strcmp(s, "SEQ")==0) return SEQ;
-  else if(strcmp(s, "PACK")==0) return PACK;
-  else if(strcmp(s, "BOMB")==0) return BOMB;
-  else {
-    *err = 1;
-    return 0;
-  }
-}
-
-/*
-enum subop strToSubop(char* s){
-  if(strcmp(s, "r+")==0) return RPLUS;
-  else if(strcmp(s, "imm")==0) return IMM;
-  else if(strcmp(s, "x")==0) return X;
-  else if(strcmp(s, "c[]")==0) return CLO;
-  else if(strcmp(s, "addr")==0) return ADDR;
-  else{
-    fprintf(stderr, "strToSubop failed\n");
-    exit(-1);
-  }
-}
-*/
-
-/*
-generator syntax:
-4
-print3 H r+ c[] imm 2 3 4
-print1 H x 0
-copyx
-copyc 9
-*/
-
-/*
-struct sizedGen loadGenerator(char* path){
-  FILE* file;
-  int size;
-  int i;
-
-  char buf[256];
-
-  int tmp0, tmp1, tmp2;
-  enum subop subop0, subop1, subop2;
-  enum H tmpH;
-
-  file = fopen(path,"r");
-  if(file == NULL){
-    fprintf(stderr, "can't open generator file\n");
-    exit(-1);
-  }
-
-  if(fscanf(file, "%d\n", &size) < 1){
-    fprintf(stderr, "error loading generator\n");
-    exit(-1);
-  }
-
-  struct genIn* codes = malloc(size * sizeof(struct genIn));
-
-  for(i=0; i<size; i++){
-    if(fscanf(file, "%s ", buf) < 1){
-      fprintf(stderr, "bad line\n");
-      exit(-1);
-    }
-    if(strcmp(buf,"print1")==0){
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad head symbol\n"); exit(-1); }
-      tmpH = strToH(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop0 = strToSubop(buf);
-      if(fscanf(file, "%d\n", &tmp0) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      codes[i].type = PRINT1;
-      codes[i].K = tmpH;
-      codes[i].sub[0] = subop0;
-      codes[i].pay[0] = tmp0;
-    }
-    else if(strcmp(buf,"print2")==0){
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad head symbol\n"); exit(-1); }
-      tmpH = strToH(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop0 = strToSubop(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop1 = strToSubop(buf);
-      if(fscanf(file, "%d\n", &tmp0) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      if(fscanf(file, "%d\n", &tmp1) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      codes[i].type = PRINT2;
-      codes[i].K = tmpH;
-      codes[i].sub[0] = subop0;
-      codes[i].sub[1] = subop1;
-      codes[i].pay[0] = tmp0;
-      codes[i].pay[1] = tmp1;
-    }
-    else if(strcmp(buf,"print3")==0){
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad head symbol\n"); exit(-1); }
-      tmpH = strToH(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop0 = strToSubop(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop1 = strToSubop(buf);
-      if(fscanf(file, "%s ", buf) < 1){ fprintf(stderr, "bad subop\n"); exit(-1); }
-      subop2 = strToSubop(buf);
-      if(fscanf(file, "%d\n", &tmp0) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      if(fscanf(file, "%d\n", &tmp1) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      if(fscanf(file, "%d\n", &tmp2) < 1){ fprintf(stderr, "bad number\n"); exit(-1); }
-      codes[i].type = PRINT3;
-      codes[i].K = tmpH;
-      codes[i].sub[0] = subop0;
-      codes[i].sub[1] = subop1;
-      codes[i].sub[2] = subop2;
-      codes[i].pay[0] = tmp0;
-      codes[i].pay[1] = tmp1;
-      codes[i].pay[2] = tmp2;
-    }
-    else if(strcmp(buf,"copyx")==0){
-      codes[i].type = COPYX;
-    }
-    else if(strcmp(buf,"copyc")==0){
-      if(fscanf(file, "%d\n", &tmp0) < 1){
-        fprintf(stderr, "bad copyc instruction\n");
-        exit(-1);
-      }
-      codes[i].type = COPYC;
-      codes[i].pay[0] = tmp0;
-    }
-    else{
-      fprintf(stderr, "bad opcode\n");
-      exit(-1);
-    }
-  }
-
-  fclose(file);
-
-  struct sizedGen g = {size, codes};
-  return g;
-}
-*/
 
 // Garbage Collector
 
@@ -769,73 +559,7 @@ struct obj* reserve(int amount, struct obj* cur, struct runtime* rts){
 
 
 
-// Interpreter
-//
-// Actually there are two interpreters. One for the generator language
-// one for the heap language.
-
-/*
-struct obj* runGenerator(
-  struct obj* x,
-  struct obj clo[],
-  struct sizedGen sg,
-  struct runtime* rts
-){
-  ucom tmp[3];
-  int i,j;
-  struct obj* target = rts->heap + rts->heapPtr;
-  int n = sg.size;
-  struct genIn* gi;
-  for(i=0; i<n; i++){
-    gi = sg.code + i;
-    switch(gi->type){
-      case COPYX: cloneObj(x,rts); break;
-      case COPYC: cloneObj(&clo[gi->pay[0]], rts); break;
-      case PRINT1:
-        switch(gi->sub[0]){
-          case RPLUS:  tmp[0].ptr = target+gi->pay[0]; break;
-          case IMM:    tmp[0].i   = gi->pay[0]; break;
-          case X:      tmp[0].ptr = x; break;
-          case CLO:    tmp[0].ptr = &clo[gi->pay[0]]; break;
-          case ADDR:   tmp[0].ptr = rts->heap + gi->pay[0]; break;
-          default: fprintf(stderr, "bad generator subinstruction 1\n"); exit(-1); break;
-        }
-        put1(gi->K, tmp[0], rts);
-        break;
-      case PRINT2:
-        for(j=0; j<2; j++){
-          switch(gi->sub[j]){
-            case RPLUS: tmp[j].ptr = target+gi->pay[j]; break;
-            case IMM:   tmp[j].i   = gi->pay[j]; break;
-            case X:     tmp[j].ptr = x; break;
-            case CLO:   tmp[j].ptr = &clo[gi->pay[j]]; break;
-            case ADDR:  tmp[j].ptr = rts->heap + gi->pay[j]; break;
-            default: fprintf(stderr, "bad generator subinstruction 2\n"); exit(-1); break;
-          }
-        }
-        put2(gi->K, tmp[0], tmp[1], rts);
-        break;
-      case PRINT3:
-        for(j=0; j<3; j++){
-          switch(gi->sub[j]){
-            case RPLUS: tmp[j].ptr = target+gi->pay[j]; break;
-            case IMM:   tmp[j].i   = gi->pay[j]; break;
-            case X:     tmp[j].ptr = x; break;
-            case CLO:   tmp[j].ptr = &clo[gi->pay[j]]; break;
-            case ADDR:  tmp[j].ptr = rts->heap + gi->pay[j]; break;
-            default: fprintf(stderr, "bad generator subinstruction 3\n"); exit(-1); break;
-          }
-        }
-        put3(gi->K, tmp[0], tmp[1], tmp[2], rts);
-        break;
-      default: fprintf(stderr, "bad generator instruction\n"); exit(-1);
-    }
-  }
-
-  return target;
-}
-*/
-
+// function body assembler
 
 bodyProc compile(struct instr* src, int size, jit_context_t ctx){
   jit_type_t mySig;
@@ -977,6 +701,36 @@ int isAtom(enum H h){
     case UNIT:
     case BOMB: return 1;
     default: return 0;
+  }
+}
+
+enum H toH(char* s, int* err){
+  if(strcmp(s, "UNIT")==0) return UNIT;
+  else if(strcmp(s, "T")==0) return T;
+  else if(strcmp(s, "F")==0) return F;
+  else if(strcmp(s, "Z")==0) return Z;
+  else if(strcmp(s, "S")==0) return S;
+  else if(strcmp(s, "P")==0) return P;
+  else if(strcmp(s, "NIL")==0) return NIL;
+  else if(strcmp(s, "CONS")==0) return CONS;
+  else if(strcmp(s, "LAM")==0) return LAM;
+  else if(strcmp(s, "IF")==0) return IF;
+  else if(strcmp(s, "ITER")==0) return ITER;
+  else if(strcmp(s, "AT")==0) return AT;
+  else if(strcmp(s, "PR1")==0) return PR1;
+  else if(strcmp(s, "PR2")==0) return PR2;
+  else if(strcmp(s, "FOLD")==0) return FOLD;
+  else if(strcmp(s, "IND")==0) return IND;
+  else if(strcmp(s, "FWD")==0) return FWD;
+  else if(strcmp(s, "INT")==0) return INT;
+  else if(strcmp(s, "BIND")==0) return BIND;
+  else if(strcmp(s, "DO")==0) return DO;
+  else if(strcmp(s, "SEQ")==0) return SEQ;
+  else if(strcmp(s, "PACK")==0) return PACK;
+  else if(strcmp(s, "BOMB")==0) return BOMB;
+  else {
+    *err = 1;
+    return 0;
   }
 }
 
