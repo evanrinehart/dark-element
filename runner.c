@@ -1,21 +1,26 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <errno.h>
+
+#include <jit/jit.h>
+
+//FIXME list
+//exception frame and handler functions don't exist
+//loader for function source code needs to be rewritten
+//JIT for compiling function code not complete
 
 // C program which continually applies the evaluation rule
 
 enum H
   {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,LAM,
   IF,ITER,AT,PR1,PR2,FOLD,
-  IND,FWD,BIND,PACK,SEQ};
+  IND,FWD,BIND,PACK,SEQ,BOMB};
 // other things... ADDR, DOUBLE, BUFFER, CELL, VECTOR
 
-enum GI {COPYX, COPYC, PRINT1, PRINT2, PRINT3};
-enum subop {RPLUS, IMM, X, CLO, ADDR};
-
 enum reason
-  {FFI_EOF, FFI_ARGUMENT_ERROR, FFI_EXIT};
+  {NO_REASON, FFI_EOF, FFI_ARGUMENT_ERROR, FFI_EXIT};
 
 struct obj;
 
@@ -37,13 +42,6 @@ struct obj {
   union component com[3];
 };
 
-struct genIn {
-  enum GI type;
-  enum H K;
-  enum subop sub[3];
-  int pay[3];
-};
-
 struct runtime {
   int heapSize;
   int heapPtr;
@@ -52,32 +50,57 @@ struct runtime {
   int stackSize;
   int stackPtr;
   struct obj** stack;
+  int exceptionStackSize;
   int exceptionStackPtr;
-  struct obj* exceptionStack[64];
+  struct obj** exceptionStack;
   struct obj unit;
   struct obj ff;
   struct obj tt;
   struct obj nil;
   struct obj zero;
+  struct obj bomb;
   enum reason stuckReason;
   struct obj* cursor;
-  struct obj* root;
 };
+
+typedef struct obj* (*ffiProc)(struct obj*, struct obj*, struct runtime*);
 
 struct ffi {
   char name[64];
   int spaceNeeded;
-  struct obj* (*execute)(struct obj* x, struct obj* k, struct runtime* rts);
+  ffiProc execute;
 };
 
-struct sizedGen {
+//types for loading generator code
+enum instr_t {COPYX, COPYC, PRINT1, PRINT2, PRINT3};
+enum icom_t {IRPLUS, IINT, IX, ICLO, IATOM, IFFI};
+struct icom {
+  enum icom_t type;
+  int i;
+};
+
+struct instr {
+  enum instr_t type;
+  enum H head;
+  struct icom icom[3];
+};
+
+struct source {
   int size;
-  struct genIn* code;
+  struct instr* code;
 };
 
-struct sizedGen generators[4096];
 
-struct ffi ffiBindings[64];
+
+//lambda body takes the form of compiled code that scribbles heap objects
+typedef struct obj* (*bodyProc)(struct obj*, struct obj*, struct runtime*);
+
+struct body {
+  int size;
+  bodyProc generate;
+};
+
+
 
 int isVal(struct obj* o, int dontExec){
   if(dontExec > 0 && o->h == BIND) return 1;
@@ -85,7 +108,52 @@ int isVal(struct obj* o, int dontExec){
   else            return 0;
 }
 
-// Stack and Heap operations
+
+// Global FFI Bindings
+
+struct ffi ffiBindings[64];
+int ffiBindingsPtr = 0;
+
+void registerFFI(char* name, int space, ffiProc execute){
+  strcpy(ffiBindings[ffiBindingsPtr].name, name);
+  ffiBindings[ffiBindingsPtr].spaceNeeded = space;
+  ffiBindings[ffiBindingsPtr].execute = execute;
+  ffiBindingsPtr++;
+}
+
+// Global compiled function bodies
+
+struct body functionBodies[4096];
+int functionBodiesPtr = 0;
+
+// Runtime Stack and Heap operations
+
+struct runtime blankRuntime(){
+  struct runtime rts;
+  rts.stackSize = 4096;
+  rts.stack = malloc(rts.stackSize * sizeof(struct obj*));
+  rts.stackPtr = 0;
+  rts.heapSize = 4096;
+  rts.heap = malloc(rts.heapSize * sizeof(struct obj));
+  rts.oldHeap = malloc(rts.heapSize * sizeof(struct obj));
+  rts.heapPtr = 0;
+
+  rts.exceptionStackSize = 64;
+  rts.exceptionStack = malloc(rts.exceptionStackSize * sizeof(struct obj*));
+  rts.exceptionStackPtr = 0;
+
+  rts.unit.h = UNIT;
+  rts.tt.h = T;
+  rts.ff.h = F;
+  rts.nil.h = NIL;
+  rts.zero.h = Z;
+  rts.bomb.h = BOMB;
+
+  rts.stuckReason = NO_REASON;
+
+  rts.cursor = rts.heap;
+  return rts;
+}
 
 void growStack(struct runtime* rts){
   rts->stackSize *= 2;
@@ -119,6 +187,14 @@ struct obj* putObj(enum H h, struct runtime* rts){
   rts->heapPtr++;
   return ptr;
 }
+
+struct obj* cloneObj(struct obj* orig, struct runtime* rts){
+  struct obj* ptr = rts->heap + rts->heapPtr;
+  rts->heap[rts->heapPtr] = *orig;
+  rts->heapPtr++;
+  return ptr;
+}
+
 
 struct obj* put1(enum H h, ucom x, struct runtime* rts){
   struct obj* o = putObj(h,rts);
@@ -172,13 +248,6 @@ ucom put3u(enum H h, ucom x, ucom y, ucom z, struct runtime* rts){
   return v;
 }
 
-struct obj* cloneObj(struct obj* orig, struct runtime* rts){
-  struct obj* ptr = rts->heap + rts->heapPtr;
-  rts->heap[rts->heapPtr] = *orig;
-  rts->heapPtr++;
-  return ptr;
-}
-
 struct obj* cloneClosure(struct obj* orig, int size, struct runtime* rts){
   int i;
   struct obj* clo;
@@ -188,9 +257,6 @@ struct obj* cloneClosure(struct obj* orig, int size, struct runtime* rts){
   // awkwardly clo points to the last element, go back size-1
   return clo - (size - 1);
 }
-
-
-// Exception stuff
 
 struct obj* popExStack(struct runtime* rts){
   if(rts->exceptionStackPtr == 0){
@@ -226,59 +292,111 @@ struct obj* mkHandler(struct obj* h, struct obj* k, struct runtime* rts){
 
 // Printers So We Can Tell What's Going On
 
-#define REL(o,i) (o->com[i].ptr - rts->heap)
-
-void printObj(struct obj* o, struct runtime* rts){
-  switch(o->h){
-    case UNIT: printf("○\b●\n"); return;
-    case T:    printf("T\n"); return;
-    case F:    printf("F\n"); return;
-    case Z:    printf("Z\n"); return;
-    case S:    printf("S %ld\n",REL(o,0)); return;
-    case P:    printf("P %ld %ld\n",REL(o,0),REL(o,1)); return;
-    case NIL:  printf("NIL\n"); return;
-    case CONS: printf(":: %ld %ld\n",REL(o,0),REL(o,1)); return;
-    case LAM:  printf("λ %d g%d\n", o->com[0].i, o->com[1].i); return;
-    case IF:   printf("IF %ld %ld %ld\n",REL(o,0),REL(o,1),REL(o,2)); return;
-    case ITER: printf("ITER %ld %ld %ld\n",REL(o,0),REL(o,1),REL(o,2)); return;
-    case FOLD: printf("FOLD %ld %ld %ld\n",REL(o,0),REL(o,1),REL(o,2)); return;
-    case PR1:  printf("PR1 %ld\n",REL(o,0)); return;
-    case PR2:  printf("PR2 %ld\n",REL(o,0)); return;
-    case AT:   printf("@ %ld %ld\n",REL(o,0),REL(o,1)); return;
-    case FWD:  printf("FWD %ld\n",REL(o,0)); return;
-    case IND:  printf("IND %ld\n",REL(o,0)); return;
-    case INT:  printf("INT %d\n", o->com[0].i); return;
-    case DO:  printf("DO %s %ld\n", ffiBindings[o->com[0].i].name, REL(o,1)); return;
-    case BIND:  printf("BIND %ld %ld\n", REL(o,0), REL(o,1)); return;
-    case PACK:  printf("PACK %ld\n",REL(o,0) ); return;
-    case SEQ:  printf("SEQ %ld %ld\n", REL(o,0), REL(o,1)); return;
+void printK(enum H k){
+  switch(k){
+    case UNIT: printf("●"); return;    //●
+    case T:    printf("T"); return;    //
+    case F:    printf("F"); return;
+    case Z:    printf("Z"); return;
+    case S:    printf("S "); return;
+    case P:    printf("P "); return;
+    case NIL:  printf("NIL"); return;  //0
+    case CONS: printf("CONS "); return; //:
+    case LAM:  printf("λ "); return;    //λ
+    case IF:   printf("IF "); return;   //B
+    case ITER: printf("ITER "); return; //I
+    case FOLD: printf("FOLD "); return; //C
+    case PR1:  printf("PR1 "); return;  //1
+    case PR2:  printf("PR2 "); return;  //2
+    case AT:   printf("@ "); return;    //@
+    case IND:  printf("IND "); return;  //>
+    case FWD:  printf("FWD "); return;
+    case INT: printf("INT "); return;   //N
+    case DO: printf("DO "); return;     //D
+    case BIND: printf("BIND "); return; //M
+    case PACK: printf("PACK "); return; //K
+    case SEQ: printf("SEQ "); return;   //Q
+    case BOMB: printf("BOMB"); return;  //!
   }
 }
 
-void printK(enum H k){
-  switch(k){
-    case UNIT: printf("UNIT "); return;
-    case T:    printf("T "); return;
-    case F:    printf("F "); return;
-    case Z:    printf("Z "); return;
-    case S:    printf("S "); return;
-    case P:    printf("P "); return;
-    case NIL:  printf("NIL "); return;
-    case CONS: printf("CONS "); return;
-    case LAM:  printf("λ "); return;
-    case IF:   printf("IF "); return;
-    case ITER: printf("ITER "); return;
-    case FOLD: printf("FOLD "); return;
-    case PR1:  printf("PR1 "); return;
-    case PR2:  printf("PR2 "); return;
-    case AT:   printf("@ "); return;
-    case IND:  printf("IND "); return;
-    case FWD:  printf("FWD "); return;
-    case INT: printf("INT "); return;
-    case DO: printf("DO "); return;
-    case BIND: printf("BIND "); return;
-    case PACK: printf("PACK "); return;
-    case SEQ: printf("SEQ "); return;
+void printComp(struct obj* o, struct runtime* rts){
+  if(o==&rts->zero) printf("Z");
+  else if(o==&rts->tt) printf("T");
+  else if(o==&rts->ff) printf("F");
+  else if(o==&rts->nil) printf("NIL");
+  else if(o==&rts->unit) printf("●");
+  else if(o==&rts->bomb) printf("!!");
+  else printf("%ld", o - rts->heap);
+}
+
+void printObj(struct obj* o, struct runtime* rts){
+  if(o->h == FWD){
+    printf("_old_\n");
+    return;
+  }
+
+  printK(o->h);
+  switch(o->h){
+    case UNIT: 
+    case T:   
+    case F:  
+    case Z: 
+    case NIL:
+    case BOMB:
+      printf("\n");
+      return;
+    case S:    
+    case PR1:  
+    case PR2:  
+    case IND:  
+    case PACK: 
+      printComp(o->com[0].ptr, rts);
+      printf("\n");
+      return;
+    case P:
+    case CONS:
+    case AT:
+    case SEQ:
+    case BIND:
+      printComp(o->com[0].ptr, rts);
+      printf(" ");
+      printComp(o->com[1].ptr, rts);
+      printf("\n");
+      return;
+    case IF:
+    case ITER:
+    case FOLD:
+      printComp(o->com[0].ptr, rts);
+      printf(" ");
+      printComp(o->com[1].ptr, rts);
+      printf(" ");
+      printComp(o->com[2].ptr, rts);
+      printf("\n");
+      return;
+    case INT:
+      printf("%d\n", o->com[0].i);
+      return;
+    case DO:
+      printf("%s ", ffiBindings[o->com[0].i].name);
+      printComp(o->com[1].ptr, rts);
+      printf("\n");
+      return;
+    case LAM:
+      printf("%d g%u\n", o->com[0].i, o->com[1].i);
+      return;
+    case FWD:
+      return;
+  }
+}
+
+
+char* showReason(enum reason r){
+  switch(r){
+    case NO_REASON: return "NO_REASON";
+    case FFI_EOF: return "FFI_EOF";
+    case FFI_ARGUMENT_ERROR: return "FFI_ARGUMENT_ERROR";
+    case FFI_EXIT: return "FFI_EXIT";
   }
 }
 
@@ -286,7 +404,7 @@ void printHeap(struct runtime* rts){
   int i;
   char num[16];
   int a = 0;
-  int b = rts->heapPtr;
+  int b = rts->heapPtr + 10;
   int digits = 0;
   int tmp = b;
   while(tmp > 0){ digits++; tmp /= 10; }
@@ -294,7 +412,7 @@ void printHeap(struct runtime* rts){
   digits += 2;
 
   for(i=a; i<b; i++){
-    if(rts->heap+i==rts->root) printf("> ");
+    if(rts->heap+i==rts->cursor) printf("> ");
     else printf("  ");
     sprintf(num,"%d.",i);
     printf("%-*s ",digits,num);
@@ -302,6 +420,7 @@ void printHeap(struct runtime* rts){
   }
 }
 
+/*
 void printSubop(enum subop so){
   switch(so){
     case RPLUS:  printf("r+ ");  break;
@@ -357,11 +476,11 @@ void printGen(struct sizedGen sg){
     printGenIn(sg.code[i]);
   }
 }
-
+*/
 
 // Generator Loader
 
-enum H strToH(char* s){
+enum H toH(char* s, int* err){
   if(strcmp(s, "UNIT")==0) return UNIT;
   else if(strcmp(s, "T")==0) return T;
   else if(strcmp(s, "F")==0) return F;
@@ -380,12 +499,18 @@ enum H strToH(char* s){
   else if(strcmp(s, "IND")==0) return IND;
   else if(strcmp(s, "FWD")==0) return FWD;
   else if(strcmp(s, "INT")==0) return INT;
-  else{
-    fprintf(stderr, "strToH failed\n");
-    exit(-1);
+  else if(strcmp(s, "BIND")==0) return BIND;
+  else if(strcmp(s, "DO")==0) return DO;
+  else if(strcmp(s, "SEQ")==0) return SEQ;
+  else if(strcmp(s, "PACK")==0) return PACK;
+  else if(strcmp(s, "BOMB")==0) return BOMB;
+  else {
+    *err = 1;
+    return 0;
   }
 }
 
+/*
 enum subop strToSubop(char* s){
   if(strcmp(s, "r+")==0) return RPLUS;
   else if(strcmp(s, "imm")==0) return IMM;
@@ -397,6 +522,7 @@ enum subop strToSubop(char* s){
     exit(-1);
   }
 }
+*/
 
 /*
 generator syntax:
@@ -407,6 +533,7 @@ copyx
 copyc 9
 */
 
+/*
 struct sizedGen loadGenerator(char* path){
   FILE* file;
   int size;
@@ -506,7 +633,7 @@ struct sizedGen loadGenerator(char* path){
   struct sizedGen g = {size, codes};
   return g;
 }
-
+*/
 
 // Garbage Collector
 
@@ -550,6 +677,7 @@ void gcThin(struct obj* this, struct runtime* rts){
     case Z:
     case INT:
     case FWD:
+    case BOMB:
       break;
   }
 }
@@ -598,16 +726,20 @@ void swapHeaps(struct runtime* rts){
 }
 
 void gc(struct runtime* rts){
-  swapHeaps(rts);
-  rts->heapPtr = 5; // magic, don't mess up atomic symbols
-  rts->root = gcLoop(rts->root, rts);
-
-  //fix the stack
   int i;
-  for(i=0;i<rts->stackPtr;i++) rts->stack[i] = rts->stack[i]->com[0].ptr;
+  swapHeaps(rts);
+  rts->heapPtr = 0;
 
-  //fix cursor if any
-  if(rts->cursor) rts->cursor = rts->cursor->com[0].ptr;
+  //move everything accessible via cursor, stack, and exception stack
+  rts->cursor = gcLoop(rts->cursor, rts);
+
+  for(i=0; i<rts->exceptionStackPtr; i++){
+    rts->exceptionStack[i] = gcLoop(rts->exceptionStack[i], rts);
+  }
+
+  for(i=0; i<rts->stackPtr; i++){
+    rts->stack[i] = gcLoop(rts->stack[i], rts);
+  }
 }
 
 void growHeaps(struct runtime* rts, int newSize){
@@ -649,9 +781,7 @@ struct obj* reserve(int amount, struct obj* cur, struct runtime* rts){
     growHeaps(rts, newSize);
   }
 
-  cur = rts->cursor;
-  rts->cursor = NULL;
-  return cur;
+  return rts->cursor;
 }
 
 
@@ -661,6 +791,7 @@ struct obj* reserve(int amount, struct obj* cur, struct runtime* rts){
 // Actually there are two interpreters. One for the generator language
 // one for the heap language.
 
+/*
 struct obj* runGenerator(
   struct obj* x,
   struct obj clo[],
@@ -720,27 +851,162 @@ struct obj* runGenerator(
 
   return target;
 }
+*/
 
 
+bodyProc compile(struct instr* src, int size, jit_context_t ctx){
+  jit_type_t mySig;
+  jit_type_t params[3];
+  jit_value_t x, clo, rts;
+  jit_value_t r, ptr;
+  jit_value_t temp1, temp2, temp3;
+  jit_function_t fn;
+
+  params[0] = jit_type_void_ptr; //type of x
+  params[1] = jit_type_void_ptr; //type of clo
+  params[2] = jit_type_void_ptr; //type of rts
+
+  jit_context_build_start(ctx);
+  mySig = jit_type_create_signature(jit_abi_cdecl, jit_type_void_ptr, params, 3, 1);
+  fn = jit_function_create(ctx, mySig);
+
+  x = jit_value_get_param(fn, 0);
+  clo = jit_value_get_param(fn, 1);
+  rts = jit_value_get_param(fn, 2);
+
+  // r = rts->heap + rts->heapPtr
+  r = jit_value_create(fn, jit_type_void_ptr);
+  temp1 = jit_insn_load_relative(fn, rts, offsetof(struct runtime, heap), jit_type_void_ptr);
+  temp2 = jit_insn_load_relative(fn, rts, offsetof(struct runtime, heapPtr), jit_type_sys_int);
+  temp3 = jit_insn_add(fn, temp1, temp2); 
+  jit_insn_store(fn, r, temp3);
+
+  // prepare to generate code
+  jit_type_t com_ty = jit_type_create_union(params, 2, 1);
+  jit_value_t twoArgs[2];
+  params[0] = jit_type_sys_int;
+  params[1] = jit_type_void_ptr;
+  jit_type_t putObjSig = jit_type_create_signature(jit_abi_cdecl, jit_type_void_ptr, params, 2, 1);
+  params[0] = jit_type_void_ptr;
+  params[1] = jit_type_void_ptr;
+  jit_type_t cloneObjSig = jit_type_create_signature(jit_abi_cdecl, jit_type_void_ptr, params, 2, 1);
+  ptr = jit_value_create(fn, jit_type_void_ptr);
+
+  for(int i=0; i<size; i++){
+    struct instr* line = &src[i];
+    int atomOff;
+    if(line->type == COPYX){
+      // cloneObj(x, rts)
+      twoArgs[0] = x;
+      twoArgs[1] = rts;
+      jit_insn_call_native(fn, "cloneObj", cloneObj, cloneObjSig, twoArgs, 2, JIT_CALL_NOTHROW);
+    }
+    else if(line->type == COPYC){
+      // cloneObj(clo[i], rts)
+      twoArgs[0] = jit_insn_load_relative(fn, clo, line->icom[0].i, jit_type_void_ptr);
+      twoArgs[1] = rts;
+      jit_insn_call_native(fn, "cloneObj", cloneObj, cloneObjSig, twoArgs, 2, JIT_CALL_NOTHROW);
+    }
+    else{
+      // ptr = putObj(line->head,rts)
+      twoArgs[0] = jit_value_create_nint_constant(fn, jit_type_sys_int, line->head);
+      twoArgs[1] = rts;
+      temp1 = jit_insn_call_native(fn, "putObj", putObj, putObjSig, twoArgs, 2, JIT_CALL_NOTHROW);
+      jit_insn_store(fn, ptr, temp1);
+
+      int N;
+      switch(line->type){
+        case PRINT1: N=1; break;
+        case PRINT2: N=2; break;
+        case PRINT3: N=3; break;
+        default: fprintf(stderr,"'logic' error fix me\n"); exit(-1);
+      }
+
+      for(int j=0; j<N; j++){
+        // ptr->com[0] = r+2
+        // ptr->com[0] = 99
+        // ptr->com[0] = x
+        // ptr->com[0] = clo[i]
+        // ptr->com[0] = BOMB
+        // ptr->com[0] = &exit
+        temp1 = jit_insn_add_relative(fn, ptr, offsetof(struct obj, com));
+        switch(line->icom[j].type){
+          case IRPLUS:
+            temp3 = jit_value_create_nint_constant(fn, jit_type_sys_int, line->icom[j].i);
+            temp2 = jit_insn_add(fn, r, temp3);
+            break;
+          case IINT:
+            temp2 = jit_value_create_nint_constant(fn, jit_type_sys_int, line->icom[j].i);
+            break;
+          case IX:
+            temp2 = jit_insn_dup(fn,x);
+            break;
+          case ICLO:
+            temp2 = jit_insn_add_relative(fn, clo, line->icom[j].i);
+            break;
+          case IATOM:
+            switch(line->icom[j].i){
+              case BOMB: atomOff = offsetof(struct runtime, bomb); break;
+              case Z:    atomOff = offsetof(struct runtime, zero); break;
+              case NIL:  atomOff = offsetof(struct runtime, nil); break;
+              case T:    atomOff = offsetof(struct runtime, tt); break;
+              case F:    atomOff = offsetof(struct runtime, ff); break;
+              case UNIT: atomOff = offsetof(struct runtime, unit); break;
+            }
+            temp2 = jit_insn_add_relative(fn, rts, atomOff);
+            break;
+          case IFFI:
+            temp2 = jit_value_create_nint_constant(fn, jit_type_sys_int, line->icom[j].i);
+            break;
+        }
+        jit_insn_store_relative(fn, temp1, j*jit_type_get_size(com_ty), temp2);
+      }
+    }
+  }
+
+  // return r
+  jit_insn_return(fn, r);
+
+  jit_function_compile(fn);
+  jit_context_build_end(ctx);
+
+  bodyProc output = jit_function_to_closure(fn);
+  return output;
+  
+}
 
 void crash(char* msg){
   fprintf(stderr, "crunch crashed (%s)\n", msg);
   exit(-1);
 }
 
-// evaluate a chosen heap term until you get a value (if ever)
-struct obj* crunch(struct obj* start, struct runtime* rts){
 
-  struct obj* cur = start;
+void crunch(struct runtime* rts){
+
+  struct obj* cur = rts->cursor;
   struct obj* answer = NULL;
   int m;
   struct ffi* ffi;
   int dontExec = 0; // dontExec > 0, BIND is a value. otherwise, BIND is a dtor
+  struct body fn;
 
   for(;;){
+
+    rts->cursor = cur;
+
+    printf("\nbegin crunch loop. answer = ");
+    if(answer==NULL) printf("NULL\n");
+    else printObj(answer, rts);
+    printHeap(rts);
+
+    if(rts->stuckReason > NO_REASON){
+      printf("crunch stopped. stuck reason = %s\n", showReason(rts->stuckReason));
+      return;
+    }
+
     //value?
     if(isVal(cur,dontExec)){
-      if(rts->stackPtr == 0) return cur;
+      if(rts->stackPtr == 0) return;
       answer = cur;
       cur = pop(rts);
       continue;
@@ -753,6 +1019,7 @@ struct obj* crunch(struct obj* start, struct runtime* rts){
     }
 
     if(cur->h == FWD) crash("FWD found in live heap");
+    if(cur->h == BOMB) crash("Runtime BOMB. Check compiler.");
 
     //if it's not a value, IND, or FWD, it must be a destructor
 
@@ -892,17 +1159,16 @@ struct obj* crunch(struct obj* start, struct runtime* rts){
     }
 
     if(cur->h == AT){
-      //cur->com[0].ptr = answer;
+      // overwrite the AT node with the first node of the generated body
       if(answer->h != LAM) crash("dtor-ctor mismatch LAM/AT");
-      cur = reserve(answer->com[0].i, cur, rts);
-      struct obj* body = runGenerator(
-        cur->com[1].ptr, // argument
-        cur->com[0].ptr->com[2].ptr, // closure
-        generators[cur->com[0].ptr->com[1].i],
+      fn = functionBodies[cur->com[0].ptr->com[1].i];
+      cur = reserve(fn.size, cur, rts);
+      struct obj* body = fn.generate(
+        cur->com[1].ptr,
+        cur->com[0].ptr->com[2].ptr,
         rts
       );
-      cur->h = IND;
-      cur->com[0].ptr = body;
+      *cur = *body;
       answer = NULL;
       continue;
     }
@@ -998,47 +1264,251 @@ struct obj* ioUncatch(struct obj* x, struct obj* k, struct runtime* rts){
 }
 
 
+// Loader
+
+int isAtom(enum H h){
+  switch(h){
+    case Z:
+    case T:
+    case F:
+    case NIL:
+    case UNIT:
+    case BOMB: return 1;
+    default: return 0;
+  }
+}
+
+int ffiNo(char* name){
+  for(int i=0; i<ffiBindingsPtr; i++){
+    if(strcmp(name, ffiBindings[i].name)==0) return i;
+  }
+  return -1;
+}
+
+int loadIcom(char* input, struct icom* out){
+  int i;
+
+  if(sscanf(input, "r+%u", &i) == 1){
+    out->type = IRPLUS;
+    out->i = i;
+    return 0;
+  }
+
+  if(strcmp(input,"x")==0){
+    out->type = IX;
+    return 0;
+  }
+
+  if(sscanf(input, "%u", &i) == 1){
+    out->type = IINT;
+    out->i = i;
+    return 0;
+  }
+
+  if(sscanf(input, "clo[%u]", &i) == 1){
+    out->type = ICLO; 
+    out->i = i;
+    return 0;
+  }
+
+  int failed = 0;
+  enum H h = toH(input, &failed);
+  if(!failed && isAtom(h)){
+    out->type = IATOM;
+    out->i = h;
+    return 0;
+  }
+
+  i = ffiNo(input);
+  if(i < 0){
+    return -1;
+  }
+  else{
+    out->type = IFFI;
+    out->i = i;
+    return 0;
+  }
+
+}
+
+int isBlank(char* buf){
+  char c;
+  for(int i=0; buf[i]!='\0'; i++){
+    c = buf[i];
+    if(c != ' ' && c != '\n' && c != '\r') return 0;
+  }
+  return 1;
+}
+
+void loadLine(FILE* file, struct instr* out, int* errOut, int* eofOut){
+  const int max = 256;
+  char buf[max];
+  char buf0[max];
+  char buf1[max];
+  char buf2[max];
+  char buf3[max];
+
+  unsigned n;
+
+  if(fgets(buf, max, file) == NULL){
+    *eofOut = 1;
+    return;
+  }
+
+  if(isBlank(buf)){
+    *eofOut = 1;
+    return;
+  }
+
+  n = sscanf(buf, "%s %s %s %s\n", buf0, buf1, buf2, buf3);
+
+  if(n < 1){
+    *errOut = 1;
+    return;
+  }
+
+  // buf0 could be x, clo[i], a symbol, or invalid
+  if(strcmp(buf0, "x")==0){
+    out->type = COPYX;
+    return;
+  }
+
+  int failed = 0;
+  enum H h = toH(buf0, &failed);
+  int i;
+  if(failed){
+    if(sscanf(buf0, "clo[%u]", &i) == 1){
+      out->type = COPYC;
+      out->icom[0].i = i;
+      return;
+    }
+    else{
+      *errOut = 1;
+      return;
+    }
+  }
+
+  //otherwise, ABC com0 com1 com2
+  out->head = h;
+  switch(n-1){
+    case 1:
+      out->type = PRINT1;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    case 2:
+      out->type = PRINT2;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf2, &out->icom[1]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    case 3:
+      out->type = PRINT3;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf2, &out->icom[1]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf3, &out->icom[2]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    default:
+      fprintf(stderr, "loadLine: unexpected number of components %d\n", n-1);
+      exit(-1);
+  }
+
+}
+
+
+struct source load(FILE* file){
+  int size = 0;
+  int bufSize = 16;
+  struct source src;
+  struct instr* buf = malloc(bufSize * sizeof(struct instr));
+
+  int err = 0;
+  int eof = 0;
+
+  for(;;){
+    loadLine(file, &buf[size], &err, &eof);
+    if(eof){
+      src.size = size;
+      src.code = buf;
+      return src;
+    }
+
+    if(err){
+      fprintf(stderr, "load file failed on line %d\n", size);
+      exit(-1);
+    }
+
+    if(size == bufSize){
+      bufSize *= 2;
+      buf = realloc(buf, bufSize * sizeof(struct instr));
+    }
+
+    size++;
+  }
+
+}
+
+
 int main(){
-  int c;
-  int counter;
-  struct obj* tmp;
+  registerFFI("exit", 0, ioExit);
+  registerFFI("getc", 2, ioGetC);
+  registerFFI("putc", 1, ioPutC);
+  registerFFI("catch", 4, ioCatch);
+  registerFFI("raise", 1, ioRaise);
+  registerFFI("uncatch", 1, ioUncatch);
 
-  struct runtime* rts;
-  rts->stackSize = 4096;
-  rts->stack = malloc(rts->stackSize * sizeof(struct obj*));
-  rts->stackPtr = 0;
-  rts->heapSize = 4096;
-  rts->heap = malloc(rts->heapSize * sizeof(struct obj));
-  rts->oldHeap = malloc(rts->heapSize * sizeof(struct obj));
-  rts->heapPtr = 0;
+  struct runtime myRuntime = blankRuntime();
+  struct runtime* rts = &myRuntime;
 
-  // initialize heaps with magic atomic values
-  rts->unit.h = UNIT;
-  rts->tt.h = T;
-  rts->ff.h = F;
-  rts->nil.h = NIL;
-  rts->zero.h = Z;
+/*
+  struct obj* v1 = putObj(BIND,rts);
+  struct obj* v2 = putObj(DO,rts);
+  struct obj* v3 = putObj(INT,rts);
+  v1->com[0].ptr = v2;
+  v1->com[1].ptr = &rts->bomb;
+  v2->com[0].i = 2;
+  v2->com[1].ptr = v3;
+  v3->com[0].i = 65;
+*/
 
-  // test data
-  put2p(AT,
-    put2p(LAM,&rts->zero,&rts->zero,rts),
-    &rts->unit,
-    rts
-  ); // (\ 0 0) @ UNIT
-  rts->root = rts->heap + 6;
+  FILE* file = fopen("mygen", "r");
+  struct source s = load(file);
 
-  // load generator file
-  struct sizedGen sg = loadGenerator("mygen");
-  // register generator in position g0
-  generators[0] = sg;
+  jit_init();
+  jit_context_t ctx = jit_context_create();
+  if(ctx==NULL){
+    printf("ctx could not be created\n");
+    exit(-1);
+  }
+  bodyProc p = compile(s.code, s.size, ctx);
 
-  printHeap(rts);
 
-  crunch(rts->root, rts);
+  printf("prepare to run jitted function (%p)\n", rts->heap + rts->heapPtr);
+  struct obj* r = p(&rts->unit, rts->heap, rts);
+  printf("ran the function and survived? (%p)\n", r);
+
+  jit_context_destroy(ctx);
+
+
+  crunch(rts);
 
   return 0;
-    
-
 }
 
 
