@@ -24,6 +24,11 @@ struct obj {
   union component com[3];
 };
 
+#define LAMCSIZE(o) (o->com[0].i)
+#define LAMBODY(o) (&functionBodies[o->com[1].i])
+#define LAMCLO(o) (o->com[2].ptr)
+#define DOPROC(o) (&ffiBindings[o->com[0].i])
+
 // runtime stuff
 
 enum reason
@@ -471,13 +476,13 @@ struct obj* gcLoop(struct obj* this, struct runtime* rts){
   this->com[0].ptr = that;
 
   // "fat lambda" node needs special care
-  int lamSize = that->com[0].i;
+  int lamSize = LAMCSIZE(that);
   if(that->h == LAM && lamSize > 0){
     if(this->com[2].ptr->h == FWD){//shared closure already moved
       that->com[2] = this->com[2];
     }
     else{
-      struct obj* clo = cloneClosure(that->com[2].ptr, lamSize, rts);
+      struct obj* clo = cloneClosure(LAMCLO(that), lamSize, rts);
       that->com[2].ptr->h = FWD;
       that->com[2].ptr->com[0].ptr = clo;
       that->com[2].ptr = clo;
@@ -942,7 +947,7 @@ void crunch(struct runtime* rts){
   int m;
   struct ffi* ffi;
   int dontExec = 0; // dontExec > 0, BIND is a value. otherwise, BIND is a dtor
-  struct body fn;
+  struct body* fn;
 
   for(;;){
 
@@ -1057,7 +1062,6 @@ void crunch(struct runtime* rts){
     }
 
     if(cur->h == ITER){
-      //cur->com[2].ptr = answer;
       switch(answer->h){
         case Z: *cur = *(cur->com[0].ptr); break;
         case S:
@@ -1092,7 +1096,6 @@ void crunch(struct runtime* rts){
     }
 
     if(cur->h == FOLD){
-      //cur->com[2].ptr = answer;
       switch(answer->h){
         case NIL: *cur = *(cur->com[0].ptr); break;
         case CONS:
@@ -1115,11 +1118,11 @@ void crunch(struct runtime* rts){
     if(cur->h == AT){
       // overwrite the AT node with the first node of the generated body
       if(answer->h != LAM) crash("dtor-ctor mismatch LAM/AT");
-      fn = functionBodies[cur->com[0].ptr->com[1].i];
-      cur = reserve(fn.size, cur, rts);
-      struct obj* body = fn.generate(
+      fn = LAMBODY(answer);
+      cur = reserve(fn->size, cur, rts);
+      struct obj* body = fn->generate(
         cur->com[1].ptr,
-        cur->com[0].ptr->com[2].ptr,
+        LAMCLO(cur->com[0].ptr),
         rts
       );
       *cur = *body;
@@ -1134,7 +1137,7 @@ void crunch(struct runtime* rts){
     if(cur->h == BIND){
       if(answer->h != DO) crash("dtor-ctor mismatch DO/BIND");
       // DO ffi x >>= k   ==>  ffi(x,k)
-      ffi = &ffiBindings[answer->com[0].i];
+      ffi = DOPROC(answer);
       // reserve an amount of space that depends on the FFI action
       cur = reserve(ffi->spaceNeeded, cur, rts);
       cur = ffi->execute(
