@@ -1529,29 +1529,23 @@ int main(){
 // basically this machine has these components
 // - heap x2
 // - stack
-// - root
 // - cursor
 // - answer
 // - generators
+// ...
+// - exception handling stack
+// - ffi procedures
+// - garbage collector
+// 
 //
 // the interpreter algorithm (crunch) contains several hard coded destruct
 // rules which vary in terms of memory-use, decision making, result sourcing,
 // and in the case of iter, access of primitives.
 //
-// the i/o driver has three hard coded behaviors, one for each I/O primitive.
-// this implements the i/o loop.
-//
-// the generator language can currently adapt to changes in the data language.
-// it may need to be updated if certain primitives are added.
-//
 // improvement1: allow custom destruct rules. implement existing rules in terms
 // of the custom destruct language.
 //
-// improvement2: allow more general i/o. implement existing i/o in terms of
-// the custom i/o language. allow i/o to be mocked.
-//
-// improvement3: move the machine bits from global scope into a struct so you
-// can have multiple interpreters running concurrently.
+// improvement2.1: allow i/o to be mocked.
 //
 // improvement4:
 //  provide access to more primitives data types like ints, floats, arrays,
@@ -1560,7 +1554,6 @@ int main(){
 // improvement0:
 //   write tests of all the existing generation instructions and data nodes
 //
-// improvement5: add exceptions for things like IO errors
 // improvement6: some kind of "stack trace"
 
 
@@ -1575,13 +1568,3 @@ int main(){
 // fold(b,f,x:xs) = f x fold(b,f,xs) recursion on component
 // (LAM n g)[ci] @ x = g(x,ci)       generator based
 // all but 1 of these can be implemented with the destruct rule for W-types.
-//
-// i/o generalizations
-// INPUT k         get data, decode data, apply handler
-// OUTPUT c k      encode/crunch argument, execute and ignore, run k
-// EXIT            execute effect, not expected to return
-// so we are expecting certain data values to be convertible to foreign
-// data. then we are expecting to decode foreign data results.
-// We might also want multiple continuations, like in case of exception
-// handling. might want to do i/o actions in dedicated threads and interleave
-// processes in another thread.
