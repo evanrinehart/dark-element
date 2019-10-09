@@ -6,41 +6,28 @@
 
 #include <jit/jit.h>
 
-//FIXME list
-//exception frame and handler functions don't exist
-//loader for function source code needs to be rewritten
-//JIT for compiling function code not complete
-
-// C program which continually applies the evaluation rule
-
+// heap object nuts and bolts
 enum H
   {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,LAM,
   IF,ITER,AT,PR1,PR2,FOLD,
   IND,FWD,BIND,PACK,SEQ,BOMB};
-// other things... ADDR, DOUBLE, BUFFER, CELL, VECTOR
-
-enum reason
-  {NO_REASON, FFI_EOF, FFI_ARGUMENT_ERROR, FFI_EXIT};
 
 struct obj;
 
-union component{
+typedef union component{
   int i;
   struct obj* ptr;
-  //void* addr;   (foreign pointer)
-  //double d;     (raw double)
-  //unsigned char* buf; (byte array)
-  //cell*              (mutable cell)
-  //struct obj** vec;  (vector of boxed)
-};
-// other things... ADDR, DOUBLE, BUFFER, CELL, VECTOR
-
-typedef union component ucom;
+} ucom;
 
 struct obj {
   enum H h;
   union component com[3];
 };
+
+// runtime stuff
+
+enum reason
+  {NO_REASON, FFI_EOF, FFI_ARGUMENT_ERROR, FFI_EXIT};
 
 struct runtime {
   int heapSize;
@@ -62,6 +49,9 @@ struct runtime {
   enum reason stuckReason;
   struct obj* cursor;
 };
+
+
+// ffi stuff
 
 typedef struct obj* (*ffiProc)(struct obj*, struct obj*, struct runtime*);
 
@@ -100,13 +90,6 @@ struct body {
   bodyProc generate;
 };
 
-
-
-int isVal(struct obj* o, int dontExec){
-  if(dontExec > 0 && o->h == BIND) return 1;
-  if(o->h <= LAM) return 1;
-  else            return 0;
-}
 
 
 // Global FFI Bindings
@@ -287,8 +270,6 @@ struct obj* mkHandler(struct obj* h, struct obj* k, struct runtime* rts){
   // and so requires 2 space
   return NULL; // \ex -> h ex >>= k
 }
-
-
 
 // Printers So We Can Tell What's Going On
 
@@ -985,11 +966,220 @@ bodyProc compile(struct instr* src, int size, jit_context_t ctx){
   
 }
 
+// Loader
+
+int isAtom(enum H h){
+  switch(h){
+    case Z:
+    case T:
+    case F:
+    case NIL:
+    case UNIT:
+    case BOMB: return 1;
+    default: return 0;
+  }
+}
+
+int ffiNo(char* name){
+  for(int i=0; i<ffiBindingsPtr; i++){
+    if(strcmp(name, ffiBindings[i].name)==0) return i;
+  }
+  return -1;
+}
+
+int loadIcom(char* input, struct icom* out){
+  int i;
+
+  if(sscanf(input, "r+%u", &i) == 1){
+    out->type = IRPLUS;
+    out->i = i;
+    return 0;
+  }
+
+  if(strcmp(input,"x")==0){
+    out->type = IX;
+    return 0;
+  }
+
+  if(sscanf(input, "%u", &i) == 1){
+    out->type = IINT;
+    out->i = i;
+    return 0;
+  }
+
+  if(sscanf(input, "clo[%u]", &i) == 1){
+    out->type = ICLO; 
+    out->i = i;
+    return 0;
+  }
+
+  int failed = 0;
+  enum H h = toH(input, &failed);
+  if(!failed && isAtom(h)){
+    out->type = IATOM;
+    out->i = h;
+    return 0;
+  }
+
+  i = ffiNo(input);
+  if(i < 0){
+    return -1;
+  }
+  else{
+    out->type = IFFI;
+    out->i = i;
+    return 0;
+  }
+
+}
+
+int isBlank(char* buf){
+  char c;
+  for(int i=0; buf[i]!='\0'; i++){
+    c = buf[i];
+    if(c != ' ' && c != '\n' && c != '\r') return 0;
+  }
+  return 1;
+}
+
+void loadLine(FILE* file, struct instr* out, int* errOut, int* eofOut){
+  const int max = 256;
+  char buf[max];
+  char buf0[max];
+  char buf1[max];
+  char buf2[max];
+  char buf3[max];
+
+  unsigned n;
+
+  if(fgets(buf, max, file) == NULL){
+    *eofOut = 1;
+    return;
+  }
+
+  if(isBlank(buf)){
+    *eofOut = 1;
+    return;
+  }
+
+  n = sscanf(buf, "%s %s %s %s\n", buf0, buf1, buf2, buf3);
+
+  if(n < 1){
+    *errOut = 1;
+    return;
+  }
+
+  // buf0 could be x, clo[i], a symbol, or invalid
+  if(strcmp(buf0, "x")==0){
+    out->type = COPYX;
+    return;
+  }
+
+  int failed = 0;
+  enum H h = toH(buf0, &failed);
+  int i;
+  if(failed){
+    if(sscanf(buf0, "clo[%u]", &i) == 1){
+      out->type = COPYC;
+      out->icom[0].i = i;
+      return;
+    }
+    else{
+      *errOut = 1;
+      return;
+    }
+  }
+
+  //otherwise, ABC com0 com1 com2
+  out->head = h;
+  switch(n-1){
+    case 1:
+      out->type = PRINT1;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    case 2:
+      out->type = PRINT2;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf2, &out->icom[1]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    case 3:
+      out->type = PRINT3;
+      if(loadIcom(buf1, &out->icom[0]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf2, &out->icom[1]) < 0){
+        *errOut = 1;
+        return;
+      }
+      if(loadIcom(buf3, &out->icom[2]) < 0){
+        *errOut = 1;
+        return;
+      }
+      break;
+    default:
+      fprintf(stderr, "loadLine: unexpected number of components %d\n", n-1);
+      exit(-1);
+  }
+
+}
+
+
+struct source load(FILE* file){
+  int size = 0;
+  int bufSize = 16;
+  struct source src;
+  struct instr* buf = malloc(bufSize * sizeof(struct instr));
+
+  int err = 0;
+  int eof = 0;
+
+  for(;;){
+    loadLine(file, &buf[size], &err, &eof);
+    if(eof){
+      src.size = size;
+      src.code = buf;
+      return src;
+    }
+
+    if(err){
+      fprintf(stderr, "load file failed on line %d\n", size);
+      exit(-1);
+    }
+
+    if(size == bufSize){
+      bufSize *= 2;
+      buf = realloc(buf, bufSize * sizeof(struct instr));
+    }
+
+    size++;
+  }
+
+}
+
+
+
+// main interpreter loop
+
 void crash(char* msg){
   fprintf(stderr, "crunch crashed (%s)\n", msg);
   exit(-1);
 }
 
+int isVal(struct obj* o, int dontExec){
+  if(dontExec > 0 && o->h == BIND) return 1;
+  if(o->h <= LAM) return 1;
+  else            return 0;
+}
 
 void crunch(struct runtime* rts){
 
@@ -1271,207 +1461,6 @@ struct obj* ioCatch(struct obj* pair, struct obj* k, struct runtime* rts){
 struct obj* ioUncatch(struct obj* x, struct obj* k, struct runtime* rts){
   popExStack(rts);
   return put2p(AT, k, &rts->unit, rts);
-}
-
-
-// Loader
-
-int isAtom(enum H h){
-  switch(h){
-    case Z:
-    case T:
-    case F:
-    case NIL:
-    case UNIT:
-    case BOMB: return 1;
-    default: return 0;
-  }
-}
-
-int ffiNo(char* name){
-  for(int i=0; i<ffiBindingsPtr; i++){
-    if(strcmp(name, ffiBindings[i].name)==0) return i;
-  }
-  return -1;
-}
-
-int loadIcom(char* input, struct icom* out){
-  int i;
-
-  if(sscanf(input, "r+%u", &i) == 1){
-    out->type = IRPLUS;
-    out->i = i;
-    return 0;
-  }
-
-  if(strcmp(input,"x")==0){
-    out->type = IX;
-    return 0;
-  }
-
-  if(sscanf(input, "%u", &i) == 1){
-    out->type = IINT;
-    out->i = i;
-    return 0;
-  }
-
-  if(sscanf(input, "clo[%u]", &i) == 1){
-    out->type = ICLO; 
-    out->i = i;
-    return 0;
-  }
-
-  int failed = 0;
-  enum H h = toH(input, &failed);
-  if(!failed && isAtom(h)){
-    out->type = IATOM;
-    out->i = h;
-    return 0;
-  }
-
-  i = ffiNo(input);
-  if(i < 0){
-    return -1;
-  }
-  else{
-    out->type = IFFI;
-    out->i = i;
-    return 0;
-  }
-
-}
-
-int isBlank(char* buf){
-  char c;
-  for(int i=0; buf[i]!='\0'; i++){
-    c = buf[i];
-    if(c != ' ' && c != '\n' && c != '\r') return 0;
-  }
-  return 1;
-}
-
-void loadLine(FILE* file, struct instr* out, int* errOut, int* eofOut){
-  const int max = 256;
-  char buf[max];
-  char buf0[max];
-  char buf1[max];
-  char buf2[max];
-  char buf3[max];
-
-  unsigned n;
-
-  if(fgets(buf, max, file) == NULL){
-    *eofOut = 1;
-    return;
-  }
-
-  if(isBlank(buf)){
-    *eofOut = 1;
-    return;
-  }
-
-  n = sscanf(buf, "%s %s %s %s\n", buf0, buf1, buf2, buf3);
-
-  if(n < 1){
-    *errOut = 1;
-    return;
-  }
-
-  // buf0 could be x, clo[i], a symbol, or invalid
-  if(strcmp(buf0, "x")==0){
-    out->type = COPYX;
-    return;
-  }
-
-  int failed = 0;
-  enum H h = toH(buf0, &failed);
-  int i;
-  if(failed){
-    if(sscanf(buf0, "clo[%u]", &i) == 1){
-      out->type = COPYC;
-      out->icom[0].i = i;
-      return;
-    }
-    else{
-      *errOut = 1;
-      return;
-    }
-  }
-
-  //otherwise, ABC com0 com1 com2
-  out->head = h;
-  switch(n-1){
-    case 1:
-      out->type = PRINT1;
-      if(loadIcom(buf1, &out->icom[0]) < 0){
-        *errOut = 1;
-        return;
-      }
-      break;
-    case 2:
-      out->type = PRINT2;
-      if(loadIcom(buf1, &out->icom[0]) < 0){
-        *errOut = 1;
-        return;
-      }
-      if(loadIcom(buf2, &out->icom[1]) < 0){
-        *errOut = 1;
-        return;
-      }
-      break;
-    case 3:
-      out->type = PRINT3;
-      if(loadIcom(buf1, &out->icom[0]) < 0){
-        *errOut = 1;
-        return;
-      }
-      if(loadIcom(buf2, &out->icom[1]) < 0){
-        *errOut = 1;
-        return;
-      }
-      if(loadIcom(buf3, &out->icom[2]) < 0){
-        *errOut = 1;
-        return;
-      }
-      break;
-    default:
-      fprintf(stderr, "loadLine: unexpected number of components %d\n", n-1);
-      exit(-1);
-  }
-
-}
-
-
-struct source load(FILE* file){
-  int size = 0;
-  int bufSize = 16;
-  struct source src;
-  struct instr* buf = malloc(bufSize * sizeof(struct instr));
-
-  int err = 0;
-  int eof = 0;
-
-  for(;;){
-    loadLine(file, &buf[size], &err, &eof);
-    if(eof){
-      src.size = size;
-      src.code = buf;
-      return src;
-    }
-
-    if(err){
-      fprintf(stderr, "load file failed on line %d\n", size);
-      exit(-1);
-    }
-
-    if(size == bufSize){
-      bufSize *= 2;
-      buf = realloc(buf, bufSize * sizeof(struct instr));
-    }
-
-    size++;
-  }
-
 }
 
 
