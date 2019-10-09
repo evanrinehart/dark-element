@@ -383,7 +383,9 @@ void printObj(struct obj* o, struct runtime* rts){
       printf("\n");
       return;
     case LAM:
-      printf("%d g%u\n", o->com[0].i, o->com[1].i);
+      printf("%d g%u ", o->com[0].i, o->com[1].i);
+      printComp(o->com[2].ptr, rts);
+      printf("\n");
       return;
     case FWD:
       return;
@@ -856,7 +858,7 @@ struct obj* runGenerator(
 
 bodyProc compile(struct instr* src, int size, jit_context_t ctx){
   jit_type_t mySig;
-  jit_type_t params[3];
+  jit_type_t params[4];
   jit_value_t x, clo, rts;
   jit_value_t r, ptr;
   jit_value_t temp1, temp2, temp3;
@@ -874,15 +876,24 @@ bodyProc compile(struct instr* src, int size, jit_context_t ctx){
   clo = jit_value_get_param(fn, 1);
   rts = jit_value_get_param(fn, 2);
 
+  params[0] = jit_type_void_ptr;
+  params[1] = jit_type_sys_int;
+  jit_type_t com_ty = jit_type_create_union(params, 2, 1);
+
+  params[0] = jit_type_sys_int;
+  params[1] = com_ty;
+  params[2] = com_ty;
+  params[3] = com_ty;
+  jit_type_t obj_ty = jit_type_create_struct(params, 4, 1);
+
   // r = rts->heap + rts->heapPtr
   r = jit_value_create(fn, jit_type_void_ptr);
   temp1 = jit_insn_load_relative(fn, rts, offsetof(struct runtime, heap), jit_type_void_ptr);
   temp2 = jit_insn_load_relative(fn, rts, offsetof(struct runtime, heapPtr), jit_type_sys_int);
-  temp3 = jit_insn_add(fn, temp1, temp2); 
+  temp3 = jit_insn_load_elem_address(fn, temp1, temp2, obj_ty);
   jit_insn_store(fn, r, temp3);
 
   // prepare to generate code
-  jit_type_t com_ty = jit_type_create_union(params, 2, 1);
   jit_value_t twoArgs[2];
   params[0] = jit_type_sys_int;
   params[1] = jit_type_void_ptr;
@@ -932,8 +943,7 @@ bodyProc compile(struct instr* src, int size, jit_context_t ctx){
         temp1 = jit_insn_add_relative(fn, ptr, offsetof(struct obj, com));
         switch(line->icom[j].type){
           case IRPLUS:
-            temp3 = jit_value_create_nint_constant(fn, jit_type_sys_int, line->icom[j].i);
-            temp2 = jit_insn_add(fn, r, temp3);
+              temp2 = jit_insn_add_relative(fn, r, line->icom[j].i * sizeof(struct obj));
             break;
           case IINT:
             temp2 = jit_value_create_nint_constant(fn, jit_type_sys_int, line->icom[j].i);
@@ -1502,6 +1512,7 @@ int main(){
   printf("prepare to run jitted function (%p)\n", rts->heap + rts->heapPtr);
   struct obj* r = p(&rts->unit, rts->heap, rts);
   printf("ran the function and survived? (%p)\n", r);
+  p(&rts->unit, rts->heap, rts);
 
   jit_context_destroy(ctx);
 
