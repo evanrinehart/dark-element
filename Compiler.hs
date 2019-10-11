@@ -100,9 +100,10 @@ compileFn leg0 sig body = go 0 leg0 body where
         (c3,smoke3) = go' (here+length smoke1+length smoke2+1) leg e3
       Do name e -> (ADo (FFI name) c):smoke where
         (c,smoke) = go' (here+1) leg e
-      Lam x e -> (ALam n (Fat smoke) (RPlus (here+1))):closure where
+      Lam x e -> (ALam n (Fat smoke) clAddr):closure where
         sig' = closigFn x (map fst leg) e
         n = length sig'
+        clAddr = if n > 0 then RPlus (here+1) else Atom CBomb
         smoke = compileFn leg' sig' e
         leg' = (x,Arg) : map (fmap (const Clo)) leg
         closure = map f sig'
