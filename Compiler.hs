@@ -4,8 +4,6 @@ module Compiler where
 import Data.List
 import Control.Monad.State
 
-unions xxs = foldr union [] xxs
-
 -- source language with all variables unique
 data E =
   Unit | TT | FF | Z | S E | P E E | Nil | Cons E E |
@@ -18,7 +16,7 @@ data E =
 data A a =
   AP Com Com | AS Com | ACons Com Com | AAt Com Com | APr1 Com |
   APr2 Com | AIfte Com Com Com | AIter Com Com Com | AFold Com Com Com |
-  ABind Com Com | ADo Com Com | APack Com | ASeq Com Com |
+  ABind Com Com | ADo Com Com | APack Com | ASeq Com Com | AInt Int |
   AX | AClo Int | ALam Int a Com | AInd Com | AAtom CAtom
     deriving (Show,Functor,Foldable,Traversable)
 
@@ -71,6 +69,7 @@ compileFn leg0 sig body = go 0 leg0 body where
         (c,smoke) = go' (here+1) leg e
       Pack e -> (APack c):smoke where
         (c,smoke) = go' (here+1) leg e
+      MInt i -> [AInt i]
       P e1 e2 -> (AP c1 c2):smoke1 ++ smoke2 where
         (c1,smoke1) = go' (here+1) leg e1
         (c2,smoke2) = go' (here+length smoke1+1) leg e2
@@ -181,6 +180,7 @@ ppasm a = case a of
   APr2 c -> unwords ["PR2", ppcom c]
   AInd c -> unwords ["IND", ppcom c]
   APack c -> unwords ["PACK", ppcom c]
+  AInt i -> unwords ["INT", show i]
   AP c1 c2 -> unwords ["P", ppcom c1, ppcom c2]
   ACons c1 c2 -> unwords ["CONS", ppcom c1, ppcom c2]
   AAt c1 c2 -> unwords ["AT", ppcom c1, ppcom c2]
@@ -210,3 +210,6 @@ ppcom (FFI name) = name
 ppcom (Atom atom) = ppatom atom
 ppcom (CClo i) = "clo[" ++ show i ++ "]"
 ppcom X = "x"
+
+unions xxs = foldr union [] xxs
+
