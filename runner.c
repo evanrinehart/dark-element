@@ -1291,8 +1291,6 @@ int main(){
 // improvement1: allow custom destruct rules. implement existing rules in terms
 // of the custom destruct language.
 //
-// improvement2.1: allow i/o to be mocked.
-//
 // improvement4:
 //  provide access to more primitives data types like ints, floats, arrays,
 //  packed records, mutable cells

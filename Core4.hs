@@ -94,10 +94,22 @@ abstr x e = go 0 e where
   go i e@(LetV _)           = e
   go i e@(LamV _)           = e
 
+letsubst :: [E] -> NLinkE -> E
+letsubst vars e = go 0 e where
+  go j e@(LetV i)
+    | i >= j    = vars !! (i - j)
+    | otherwise = e
+  go j (Ctor h es)        = Ctor h (map (go j) es)
+  go j (Dtor d es)        = Dtor d (map (go j) es)
+  go j (Lam body)         = Lam (go j body)
+  go j (LetRec n es e)    = LetRec n (map (go (j+n)) es) (go (j+n) e)
+  go j e@(LamV _)         = e
+  go j e@(FV _)           = e
+
 -- replace free variable x_i at let-level j with LetV (i+j)
 links :: [String] -> E -> NLinkE
 links xs e = go 0 e where
-  go j e@(FV y) = case findIndex (== "y") xs of
+  go j e@(FV y) = case findIndex (== y) xs of
     Just i  -> LetV (i + j)
     Nothing -> e
   go j (Ctor h es)        = Ctor h (map (go j) es)
@@ -111,7 +123,7 @@ isVal :: E -> Bool
 isVal (Ctor _ _)     = True
 isVal (Lam _)        = True
 isVal (FV _)         = True
-isVal (LetRec _ _ e) = isVal e
+isVal (LetRec _ _ e) = False
 isVal _              = False
 
 force :: E -> E
