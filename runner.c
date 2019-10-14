@@ -1069,7 +1069,8 @@ void crunch(struct runtime* rts){
 
     if(cur->h == ITER){
       switch(answer->h){
-        case Z: *cur = *(cur->com[0].ptr); break;
+        case Z:
+          *cur = *(cur->com[0].ptr); break;
         case S:
           cur = reserve(1,cur,rts);
           ucom b = cur->com[0];
@@ -1082,10 +1083,10 @@ void crunch(struct runtime* rts){
           break;
         case INT:
           m = answer->com[0].i;
-          if(m <= 0){
+          if(m == 0){ // iter(b,f,int(0)) = b
             *cur = *(cur->com[0].ptr);
           }
-          else{ // iter(b,f,int(n)) = f @ iter(b,f,int(n-1))
+          else if(m > 0){ // iter(b,f,int(n)) = f @ iter(b,f,int(n-1))
             cur = reserve(2,cur,rts);
             ucom b = cur->com[0];
             ucom f = cur->com[1];
@@ -1095,6 +1096,7 @@ void crunch(struct runtime* rts){
             cur->com[1] = put3u(ITER, b, f, put1u(INT,um,rts),rts);
             break;
           }
+          else crash("iter on negative machine int");
         default: crash("dtor-ctor mismatch");
       }
       answer = NULL;
