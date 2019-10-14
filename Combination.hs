@@ -25,7 +25,10 @@ convert m (X.LetRec n es e) = Y.LetRec defs (convert (m+n) e') where
   e' = rename e
   es' = map rename es
   defs = zipWith (\v e -> (v, convert (m+n) e)) vars es'
-convert m (X.FV x) = Y.Var (read x)
+convert m (X.FV x) = case reads x of
+  (i,_):_ -> Y.Var i
+  [] -> error ("can't read variable " ++ x)
+  
 convert m (X.LamV _) = error "bug 1"
 convert m (X.LetV _) = error "bug 2"
 

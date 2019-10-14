@@ -7,7 +7,7 @@ import Data.Monoid ((<>))
 import Core4
 
 import Data.Void
-import Data.Text hiding (length, map, foldl1, foldr1)
+import Data.Text hiding (length, map, foldl1, foldr1, foldr)
 
 type Parser a = Parsec Void Text a
 
@@ -110,16 +110,17 @@ parseLam :: Parser E
 parseLam = do
   char '\\'
   space
-  x <- variable
-  space
+  xs <- some (variable >>= \v -> space >> return v)
   string "->"
   space
   body <- parseE1
-  return (Lam (abstr x body))
+  return (foldr (\v e -> Lam (abstr v e)) body xs)
 
 parseLetrec :: Parser E
 parseLetrec = do
-  string "letrec["
+  string "letrec"
+  space
+  char '['
   space
   eqns <- sepBy parseEquation comma
   space
@@ -138,8 +139,8 @@ parseVar = do
 
 variable :: Parser String
 variable = do
-  c <- lowerChar
-  cs <- many alphaNumChar
+  c <- lowerChar <|> char '_'
+  cs <- many (alphaNumChar <|> char '_')
   return (c:cs)
 
 parseS :: Parser E

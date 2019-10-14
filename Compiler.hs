@@ -25,7 +25,8 @@ data A a =
     ANode H [Com]
   | AX
   | AClo Int
-  | ALam Int a Com
+  | AClam a Int Com
+  | ALam a
   | AInd Com
   | ADo String Com
   | AInt Int
@@ -86,10 +87,12 @@ compileFn leg0 sig body = go 0 leg0 body where
         (c1,smoke1) = go' (here+1) leg e1
         (c2,smoke2) = go' (here+length smoke1+1) leg e2
         (c3,smoke3) = go' (here+length smoke1+length smoke2+1) leg e3
-  go here leg (Lam x e) = (ALam n (Fat smoke) clAddr):closure where
+  go here leg (Lam x e) = asm where
+    asm = if n > 0 
+      then (AClam (Fat smoke) n (RPlus (here+1))):closure
+      else [ALam (Fat smoke)]
     sig' = closigFn x (map fst leg) e
     n = length sig'
-    clAddr = if n > 0 then RPlus (here+1) else Atom CBomb
     smoke = compileFn leg' sig' e
     leg' = (x,Arg) : map (fmap (const Clo)) leg
     closure = map f sig'
@@ -175,9 +178,11 @@ ppasm a = case a of
   ANode h cs -> unwords (pph h : map ppcom cs)
   AX -> "x"
   AClo i -> "clo[" ++ show i ++ "]"
-  ALam x i addr -> unwords ["LAM", show x, show i, ppcom addr]
+  AClam i n addr -> unwords ["CLAM", show i, show n, ppcom addr]
+  ALam i -> unwords ["LAM", show i]
   ADo name c -> unwords ["DO", name, ppcom c]
   AInt i -> unwords ["INT", show i]
+  AInd c -> unwords ["IND", ppcom c]
 
 ppatom :: CAtom -> String
 ppatom CUnit = "UNIT"

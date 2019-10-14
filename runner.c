@@ -8,7 +8,7 @@
 
 // heap object nuts and bolts
 enum H
-  {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,LAM,
+  {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,CLAM,LAM,
   IF,ITER,AT,PR1,PR2,FOLD,
   IND,FWD,BIND,PACK,SEQ,BOMB};
 
@@ -24,8 +24,8 @@ struct obj {
   union component com[3];
 };
 
-#define LAMCSIZE(o) (o->com[0].i)
-#define LAMBODY(o) (&functionBodies[o->com[1].i])
+#define LAMCSIZE(o) (o->com[1].i)
+#define LAMBODY(o) (&functionBodies[o->com[0].i])
 #define LAMCLO(o) (o->com[2].ptr)
 #define DOPROC(o) (&ffiBindings[o->com[0].i])
 
@@ -289,6 +289,7 @@ void printK(enum H k){
     case NIL:  printf("NIL"); return;  //0
     case CONS: printf("CONS "); return; //:
     case LAM:  printf("λ "); return;    //λ
+    case CLAM: printf("λ "); return;    //λ
     case IF:   printf("IF "); return;   //B
     case ITER: printf("ITER "); return; //I
     case FOLD: printf("FOLD "); return; //C
@@ -369,7 +370,10 @@ void printObj(struct obj* o, struct runtime* rts){
       printf("\n");
       return;
     case LAM:
-      printf("%d g%u ", o->com[0].i, o->com[1].i);
+      printf("g%u\n", o->com[0].i);
+      return;
+    case CLAM:
+      printf("g%u %d ", o->com[0].i, o->com[1].i);
       printComp(o->com[2].ptr, rts);
       printf("\n");
       return;
@@ -448,6 +452,7 @@ void gcThin(struct obj* this, struct runtime* rts){
       this->com[1].ptr = gcLoop(this->com[1].ptr, rts);
       break;
     case LAM: // do nothing
+    case CLAM: // do nothing
     case UNIT:
     case T:
     case F:
@@ -477,7 +482,7 @@ struct obj* gcLoop(struct obj* this, struct runtime* rts){
 
   // "fat lambda" node needs special care
   int lamSize = LAMCSIZE(that);
-  if(that->h == LAM && lamSize > 0){
+  if(that->h == CLAM){
     if(this->com[2].ptr->h == FWD){//shared closure already moved
       that->com[2] = this->com[2];
     }
@@ -719,6 +724,7 @@ enum H toH(char* s, int* err){
   else if(strcmp(s, "NIL")==0) return NIL;
   else if(strcmp(s, "CONS")==0) return CONS;
   else if(strcmp(s, "LAM")==0) return LAM;
+  else if(strcmp(s, "CLAM")==0) return CLAM;
   else if(strcmp(s, "IF")==0) return IF;
   else if(strcmp(s, "ITER")==0) return ITER;
   else if(strcmp(s, "AT")==0) return AT;
@@ -1117,14 +1123,16 @@ void crunch(struct runtime* rts){
 
     if(cur->h == AT){
       // overwrite the AT node with the first node of the generated body
-      if(answer->h != LAM) crash("dtor-ctor mismatch LAM/AT");
+
       fn = LAMBODY(answer);
       cur = reserve(fn->size, cur, rts);
-      struct obj* body = fn->generate(
-        cur->com[1].ptr,
-        LAMCLO(cur->com[0].ptr),
-        rts
-      );
+
+      struct obj* clo;
+      if(answer->h == LAM) clo = NULL;
+      else if(answer->h == CLAM) clo = LAMCLO(cur->com[0].ptr);
+      else crash("dtor-ctor mismatch LAM/AT");
+
+      struct obj* body = fn->generate(cur->com[1].ptr, clo, rts);
       *cur = *body;
       answer = NULL;
       continue;
