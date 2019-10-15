@@ -8,10 +8,10 @@ import Data.Maybe (fromJust)
 --
 -- Type system pending.
 
-data H = Star | T | F | Z | S | P | Nil | Cons
+data H = Star | T | F | Z | S | P | Nil | Cons | Inl | Inr
   deriving Show
 
-data D = App | Ifte | Iter | Pr1 | Pr2 | Fold
+data D = App | Ifte | Iter | Pr1 | Pr2 | Fold | Case
   deriving Show
 
 data E =
@@ -57,6 +57,8 @@ destruct env Ifte [_, y, Ctor T []]     = y -- ifte(x,y,T) = y
 destruct env App  [Lam body, arg]       = subst arg body 
 destruct env Fold [base, f, Ctor Nil []]      = base
 destruct env Fold [base, f, Ctor Cons [x,xs]] = f @@ x @@ (Dtor Fold [base,f,xs])
+destruct env Case [f,g,Ctor Inl [e]] = f @@ e -- case(f,g,inl(e)) = f e
+destruct env Case [f,g,Ctor Inr [e]] = g @@ e -- case(f,g,inr(e)) = g e
 
 -- otherwise crunch scrutinee
 destruct env Pr1  [e]                   = Dtor Pr1  [step env e]
@@ -65,6 +67,7 @@ destruct env Iter [base, f, e]          = Dtor Iter [base, f, step env e]
 destruct env Ifte [x, y, e]             = Dtor Ifte [x, y, step env e]
 destruct env App  [e1, e2]              = Dtor App  [step env e1, e2]
 destruct env Fold [base, f, e]          = Dtor Fold [base, f, step env e]
+destruct env Case [f,g,e]               = Dtor Case [f, g, step env e]
 
 
 type HoleE = E
@@ -139,12 +142,15 @@ ff = Ctor F []
 zero = Ctor Z []
 succ x = Ctor S [x]
 pair x y = Ctor P [x,y]
+inl x = Ctor Inl [x]
+inr x = Ctor Inr [x]
 nil = Ctor Nil []
 cons x xs = Ctor Cons [x,xs]
 x @@ y = Dtor App [x,y]
 ifte x y z = Dtor Ifte [x,y,z]
 pr1 x = Dtor Pr1 [x]
 pr2 y = Dtor Pr2 [y]
+kase f g e = Dtor Case [f,g,e]
 fv x = FV x
 lam x body = Lam (abstr x body)
 letrec eqs e = LetRec n env e' where

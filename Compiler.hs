@@ -7,7 +7,7 @@ import System.IO
 
 data H = Unit | TT | FF | Z | Nil | S | P | Cons |
          At | Ifte | Iter | Pr1 | Pr2 | Fold | Bind |
-         Pack | Seq | Bomb
+         Pack | Seq | Bomb | Inl | Inr | Case
             deriving Show
 
 -- source language with all variables unique
@@ -171,6 +171,9 @@ pph h = case h of
   Pack -> "PACK"
   Seq -> "SEQ"
   Bomb -> "BOMB"
+  Inl -> "INL"
+  Inr -> "INR"
+  Case -> "CASE"
 
 -- pretty print the assembly code
 ppasm :: A Int -> String

@@ -8,7 +8,7 @@
 
 // heap object nuts and bolts
 enum H
-  {UNIT,T,F,Z,NIL,S,P,CONS,INT,DO,CLAM,LAM,
+  {UNIT,T,F,Z,NIL,S,P,CONS,INL,INR,CASE,INT,DO,CLAM,LAM,
   IF,ITER,AT,PR1,PR2,FOLD,
   IND,FWD,BIND,PACK,SEQ,BOMB};
 
@@ -281,20 +281,23 @@ struct obj* mkHandler(struct obj* h, struct obj* k, struct runtime* rts){
 void printK(enum H k){
   switch(k){
     case UNIT: printf("●"); return;    //●
-    case T:    printf("T"); return;    //
-    case F:    printf("F"); return;
-    case Z:    printf("Z"); return;
-    case S:    printf("S "); return;
-    case P:    printf("P "); return;
+    case T:    printf("T"); return;    //T
+    case F:    printf("F"); return;    //upside down T
+    case Z:    printf("Z"); return;    //Z
+    case S:    printf("S "); return;   //S
+    case P:    printf("P "); return;   //P
     case NIL:  printf("NIL"); return;  //0
     case CONS: printf("CONS "); return; //:
     case LAM:  printf("λ "); return;    //λ
     case CLAM: printf("λ "); return;    //λ
     case IF:   printf("IF "); return;   //B
     case ITER: printf("ITER "); return; //I
-    case FOLD: printf("FOLD "); return; //C
+    case FOLD: printf("FOLD "); return; //F
     case PR1:  printf("PR1 "); return;  //1
     case PR2:  printf("PR2 "); return;  //2
+    case INL:  printf("INL "); return;  //L
+    case INR:  printf("INR "); return;  //R
+    case CASE: printf("CASE "); return; //C
     case AT:   printf("@ "); return;    //@
     case IND:  printf("IND "); return;  //>
     case FWD:  printf("FWD "); return;
@@ -336,6 +339,8 @@ void printObj(struct obj* o, struct runtime* rts){
     case S:    
     case PR1:  
     case PR2:  
+    case INL:  
+    case INR:  
     case IND:  
     case PACK: 
       printComp(o->com[0].ptr, rts);
@@ -354,6 +359,7 @@ void printObj(struct obj* o, struct runtime* rts){
     case IF:
     case ITER:
     case FOLD:
+    case CASE:
       printComp(o->com[0].ptr, rts);
       printf(" ");
       printComp(o->com[1].ptr, rts);
@@ -428,6 +434,8 @@ void gcThin(struct obj* this, struct runtime* rts){
   switch(this->h){
     case PR1:
     case PR2:
+    case INL:
+    case INR:
     case S:
     case IND:
     case PACK:
@@ -444,6 +452,7 @@ void gcThin(struct obj* this, struct runtime* rts){
     case IF:
     case ITER:
     case FOLD:
+    case CASE:
       this->com[0].ptr = gcLoop(this->com[0].ptr, rts);
       this->com[1].ptr = gcLoop(this->com[1].ptr, rts);
       this->com[2].ptr = gcLoop(this->com[2].ptr, rts);
@@ -730,7 +739,10 @@ enum H toH(char* s, int* err){
   else if(strcmp(s, "AT")==0) return AT;
   else if(strcmp(s, "PR1")==0) return PR1;
   else if(strcmp(s, "PR2")==0) return PR2;
+  else if(strcmp(s, "INL")==0) return INL;
+  else if(strcmp(s, "INR")==0) return INR;
   else if(strcmp(s, "FOLD")==0) return FOLD;
+  else if(strcmp(s, "CASE")==0) return CASE;
   else if(strcmp(s, "IND")==0) return IND;
   else if(strcmp(s, "FWD")==0) return FWD;
   else if(strcmp(s, "INT")==0) return INT;
@@ -1007,6 +1019,7 @@ void crunch(struct runtime* rts){
         case ITER:
         case IF:
         case FOLD:
+        case CASE:
           cur = cur->com[2].ptr;
           continue;
         default: crash("bad destructor");
@@ -1105,7 +1118,8 @@ void crunch(struct runtime* rts){
 
     if(cur->h == FOLD){
       switch(answer->h){
-        case NIL: *cur = *(cur->com[0].ptr); break;
+        case NIL:
+          *cur = *(cur->com[0].ptr); break;
         case CONS:
           cur = reserve(2,cur,rts);
           struct obj* b = cur->com[0].ptr;
@@ -1119,6 +1133,22 @@ void crunch(struct runtime* rts){
           break;
         default: crash("dtor-ctor mismatch");
       }
+      answer = NULL;
+      continue;
+    }
+
+    if(cur->h == CASE){
+      ucom f;
+      // case(f,g,inl(e)) = f(e)
+      // case(f,g,inr(e)) = g(e)
+      switch(answer->h){
+        case INL: f = cur->com[0]; break;
+        case INR: f = cur->com[1]; break;
+        default: crash("dtor-ctor mismatch (case)");
+      }
+      cur->h = AT;
+      cur->com[0] = f;
+      cur->com[1] = cur->com[2].ptr->com[0];
       answer = NULL;
       continue;
     }

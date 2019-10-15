@@ -41,6 +41,8 @@ convCH ch = case ch of
   X.P -> Y.P
   X.Nil -> Y.Nil
   X.Cons -> Y.Cons
+  X.Inl -> Y.Inl
+  X.Inr -> Y.Inr
 
 convDH dh = case dh of
   X.App -> Y.At
@@ -49,3 +51,4 @@ convDH dh = case dh of
   X.Pr1 -> Y.Pr1
   X.Pr2 -> Y.Pr2
   X.Fold -> Y.Fold
+  X.Case -> Y.Case
